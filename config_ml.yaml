@@ -1,0 +1,78 @@
+data:
+  dataset_dir: ""            # required: path to YOLO dataset directory
+  negative_ratio: 0.2        # target ratio negatives / positives in train split
+  min_gap_frames: 5          # minimum frame-index gap at each train/val boundary
+
+classes:
+  mapping: {}                # target_class -> coco_class or [coco_class1, coco_class2, ...]
+  # examples:
+  #   "person": "person"
+  #   "vehicle": ["car", "truck", "bus"]
+
+cv:
+  n_folds: 3
+
+grid_search:
+  models:
+    - yolo11s
+    - yolo11m
+    - yolo11l
+  epochs:
+    - 5
+    - 10
+    - 15
+    - 20
+    - 25
+    - 30
+    - 35
+  freeze:
+    - full_backbone        # freeze first 10 backbone layers
+    - partial_backbone     # freeze first 6 backbone layers
+    - early_only           # freeze first 3 layers (stem only)
+    - full_finetune        # no freezing
+  freeze_bn:
+    - true
+    - false
+
+bayesian_search:
+  n_trials: 50
+  geometry:
+    perspective: [0.0, 0.003]
+    scale: [0.1, 0.5]
+    translate: [0.0, 0.2]
+    rotation: [0.0, 10.0]
+
+scoring:
+  metric: map50              # map50 | map
+  cv_mean_weight: 0.5
+  cv_std_weight: 0.2         # penalty term — higher std is worse
+  robustness_weight: 0.2
+
+augmentations:
+  mosaic: 0.0
+  mixup: 0.0
+  copy_paste: 0.0
+  fliplr: 0.5
+  flipud: 0.0
+
+robustness_probes:
+  perspective_warp: true
+  crop: true
+  blur: true
+  compression: true
+  brightness_shift: true
+  scale_perturbation: true
+
+export:
+  format: onnx
+  output_dir: ./output
+
+compute:
+  device: "0"               # cuda device index or "cpu"
+  workers: 4
+  batch: 16
+  imgsz: 640
+
+logging:
+  verbose: false
+  save_dir: ./runs
