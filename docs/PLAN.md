@@ -25,8 +25,10 @@ Deployment context:
 
 ```text
 sampled frames from a single video + negatives (optionally frames from a video with another view)
-→ temporal 3-fold CV recipe search (phase 1: grid, phase 2: Bayesian)
-→ robustness evaluation
+→ temporal 3-fold CV
+→ phase 1: model selection (grid over architectures, fixed baseline hyperparameters)
+→ phase 2: joint Bayesian search (epochs, freeze, lr0, geometry augmentation)
+→ robustness evaluation (run inside both search phases)
 → best recipe selection
 → retrain on full dataset
 → export adapted detector (ONNX)
@@ -155,36 +157,58 @@ The `min_gap_frames` parameter enforces a minimum frame index gap at every train
 
 ## Two-Phase Strategy
 
-### Phase 1 — Grid Search
+### Phase 1 — Model Selection (Grid)
 
-Exhaustive grid over discrete structural choices:
+Each candidate architecture is evaluated with a fixed set of baseline hyperparameters across all 3 CV folds. The goal is to identify the best model size before the more expensive joint search in Phase 2.
 
 ```yaml
 models: [yolo11s, yolo11m, yolo11l]
-epochs: [5, 10, 15, 20, 25, 30, 35]
-freeze: [full_backbone, partial_backbone, early_only, full_finetune]
-freeze_bn: [true, false]
+baseline:
+  epochs: 20
+  freeze: partial_backbone
+  lr0: 0.01
 ```
 
-Total combinations: 3 × 7 × 4 × 2 = 168 per fold × 3 folds = 504 training runs.
+Total runs: 3 models × 3 folds = **9 runs**.
 
-Each run is fast given small dataset size (~30 frames). No early pruning for now — simple exhaustive search. Optimisations (e.g. ASHA, Median Pruner) can be added later if needed.
+The baseline hyperparameters are fixed from domain knowledge (not searched). They exist solely to produce a fair, comparable signal across architectures. Relative model ranking is stable across reasonable hyperparameter choices, so a single canonical evaluation per model is sufficient for selection.
 
-### Phase 2 — Bayesian Search (Optuna)
+#### freeze_bn — auto-resolved, not searched
 
-After selecting the best model/freeze/epochs/freeze_bn from phase 1, run Bayesian optimisation over geometry augmentation hyperparameters only:
+`freeze_bn` is determined once before Phase 1 and held constant for both phases:
+
+```yaml
+freeze_bn: auto              # true | false | auto
+freeze_bn_auto_threshold: 100
+```
+
+- `true` / `false` — use directly
+- `auto` — set `freeze_bn=True` if `n_train_images < freeze_bn_auto_threshold`, else `False`
+
+**Rationale:** with the default batch size of 16 and fewer than 100 training images, each epoch contains fewer than ~6 batches. BatchNorm batch statistics estimated over 1–6 batches are unreliable — `freeze_bn=True` is analytically correct in this regime, not a tunable choice. Searching over it alongside continuous variables would only add noise to the objective landscape without benefit.
+
+### Phase 2 — Joint Bayesian Search (Optuna)
+
+Fixes the model selected in Phase 1 and jointly optimises the full training recipe:
 
 ```yaml
 bayesian_search:
-  n_trials: 50  # configurable
+  n_trials: 150
+  epochs: [5, 35]                    # suggest_int
+  freeze: [full_backbone, partial_backbone, early_only, full_finetune]  # suggest_categorical
+  lr0: [1.0e-4, 1.0e-2]             # suggest_float (log scale)
   geometry:
-    perspective: [min, max]
-    scale: [min, max]
-    translate: [min, max]
-    rotation: [min, max]
+    perspective: [0.0, 0.003]
+    scale: [0.1, 0.5]
+    translate: [0.0, 0.2]
+    rotation: [0.0, 10.0]
 ```
 
-Phase 2 fixes all phase 1 decisions and only searches geometry.
+All 7 variables are searched in a single study so that interactions — particularly `lr0 × freeze` and `lr0 × epochs` — are captured jointly.
+
+Optuna TPE sampler with fixed seed is used. The study is persisted to a SQLite file (`optuna_study.db`) so a crashed run resumes transparently by re-running the pipeline with the same config.
+
+**Why joint search is necessary:** `lr0` and `freeze` interact directly — a `full_finetune` strategy requires a lower `lr0` to avoid destroying pretrained features, while `early_only` tolerates a higher one. `epochs` and `lr0` are coupled through total optimisation energy. Sequential search (fix freeze, then search lr0) misses these interactions and produces a suboptimal result.
 
 ## Time Budget
 
@@ -314,13 +338,13 @@ Sections:
 - `data`: dataset_dir, negative_ratio, min_gap_frames
 - `classes`: mapping (target → COCO class or list)
 - `cv`: n_folds, min_gap_frames
-- `grid_search`: models, epochs, freeze strategies, freeze_bn
+- `grid_search`: models, epochs, freeze strategies, freeze_bn (`true|false|auto`), freeze_bn_auto_threshold
 - `bayesian_search`: n_trials, geometry aug bounds
 - `scoring`: weights, metric (map50 or map)
 - `augmentations`: mosaic, mixup, copy_paste, blur, compression, brightness_contrast
 - `robustness_probes`: per-perturbation toggles
 - `export`: format (onnx), output_dir
-- `compute`: device, workers
+- `compute`: device, workers, batch, imgsz, seed
 - `logging`: verbose, save_dir
 
 ### config_user.yaml — Project Manager Config
@@ -340,7 +364,35 @@ Pipeline loads config_ml.yaml as base, deep-merges config_user.yaml on top.
 
 ---
 
-# 11. Logging
+# 11. Reproducibility
+
+## Seed
+
+A single `compute.seed` value (default `42`) is propagated to all random sources before every training run:
+- `random.seed(seed)`
+- `numpy.random.seed(seed)`
+- `torch.manual_seed(seed)` + `torch.cuda.manual_seed_all(seed)`
+- `torch.backends.cudnn.deterministic = True`, `benchmark = False`
+- Ultralytics `model.train(seed=seed)`
+- Optuna `TPESampler(seed=seed)`
+
+Note: setting `cudnn.benchmark = False` trades ~10% throughput for deterministic convolution algorithms. This is acceptable given overnight runtime.
+
+`workers > 0` in the DataLoader retains a small source of ordering non-determinism across runs. Setting `workers=0` eliminates this at a meaningful throughput cost — not done by default.
+
+## Deterministic Run ID
+
+`run_id` is derived as a short SHA-256 hash of the stable config fields (class mapping, CV params, grid search params, Bayesian params, scoring weights, augmentations, seed, imgsz, batch). Path fields (`dataset_dir`, `output_dir`, `save_dir`) are excluded so the same experiment configuration produces the same `run_id` regardless of machine or working directory.
+
+Format: `run_{10-char hex}` — e.g. `run_3f8a1c92d0`.
+
+## Package Versions
+
+Dependencies are pinned to minor versions (`~=`) in `requirements.txt`. Torch is excluded from strict pinning because the correct wheel depends on the CUDA version of the target machine; install instructions are provided as comments in the file.
+
+---
+
+# 12. Logging
 
 - Logs are saved alongside run output: `{output_dir}/{run_id}/debug.log`
 - Controlled by `logging.verbose` flag in ML config (default: false)
@@ -349,14 +401,14 @@ Pipeline loads config_ml.yaml as base, deep-merges config_user.yaml on top.
 
 ---
 
-# 12. Export
+# 13. Export
 
 - Format: ONNX
 - Saved to `export.output_dir`
 
 ---
 
-# 13. Optional Multi-View Support
+# 14. Optional Multi-View Support
 
 If additional side-angle video/images exist:
 
@@ -373,7 +425,7 @@ Do not train on all new-view frames — the holdout must remain a real robustnes
 
 ---
 
-# 14. Phone Camera Data
+# 15. Phone Camera Data
 
 Phone images/videos are useful for viewpoint diversity and pose expansion, but should not dominate training distribution.
 
@@ -388,7 +440,7 @@ Use mostly as:
 
 ---
 
-# 15. Optional Synthetic Object-Centric Augmentation
+# 16. Optional Synthetic Object-Centric Augmentation
 
 If masks are available:
 
@@ -403,7 +455,7 @@ Useful for:
 
 ---
 
-# 16. Expected Limitations
+# 17. Expected Limitations
 
 Single-view training cannot reliably produce:
 - large viewpoint invariance
@@ -413,7 +465,7 @@ If object appearance changes significantly under camera rotation, additional vie
 
 ---
 
-# 17. Production Philosophy
+# 18. Production Philosophy
 
 This is NOT intended to:
 - produce SOTA detectors
@@ -443,4 +495,4 @@ Estimate detector stability without dense annotations:
 
 ## Search Optimisation
 ASHA scheduler, Median Pruner, or other early-stopping strategies to reduce phase 1 runtime if 12 hours proves insufficient.
-```
+

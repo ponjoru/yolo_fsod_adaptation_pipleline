@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import yaml
 from pathlib import Path
 from typing import Any
@@ -45,3 +47,32 @@ def load_config(
     cfg["data"]["_data_yaml"] = str(root / "data.yaml")
 
     return cfg
+
+
+def generate_run_id(cfg: dict[str, Any]) -> str:
+    """Deterministic run ID derived from the config fields that define what a run IS.
+
+    Path fields (dataset_dir, output_dir, save_dir) are excluded so the same
+    experiment produces the same ID regardless of where it's run.
+    """
+    stable = {
+        "classes": cfg.get("classes", {}),
+        "cv": cfg.get("cv", {}),
+        "grid_search": cfg.get("grid_search", {}),
+        "bayesian_search": cfg.get("bayesian_search", {}),
+        "scoring": cfg.get("scoring", {}),
+        "augmentations": cfg.get("augmentations", {}),
+        "data": {
+            "negative_ratio": cfg["data"]["negative_ratio"],
+            "min_gap_frames": cfg["data"]["min_gap_frames"],
+        },
+        "compute": {
+            "seed": cfg["compute"]["seed"],
+            "imgsz": cfg["compute"]["imgsz"],
+            "batch": cfg["compute"]["batch"],
+        },
+    }
+    digest = hashlib.sha256(
+        json.dumps(stable, sort_keys=True).encode()
+    ).hexdigest()[:10]
+    return f"run_{digest}"

@@ -17,25 +17,25 @@ grid_search:
     - yolo11s
     - yolo11m
     - yolo11l
-  epochs:
-    - 5
-    - 10
-    - 15
-    - 20
-    - 25
-    - 30
-    - 35
-  freeze:
-    - full_backbone        # freeze first 10 backbone layers
-    - partial_backbone     # freeze first 6 backbone layers
-    - early_only           # freeze first 3 layers (stem only)
-    - full_finetune        # no freezing
-  freeze_bn:
-    - true
-    - false
+  # Fixed baseline hyperparameters used for model comparison in Phase 1.
+  # These are not searched — they exist only to produce a fair, comparable
+  # signal across architectures before Phase 2 optimises the full recipe.
+  baseline:
+    epochs: 20
+    freeze: partial_backbone
+    lr0: 0.01
+  freeze_bn: auto              # true | false | auto
+  freeze_bn_auto_threshold: 100  # auto: freeze_bn=True if n_train_images < threshold
 
 bayesian_search:
-  n_trials: 50
+  n_trials: 150
+  epochs: [5, 35]              # int range for suggest_int
+  freeze:                      # categorical options
+    - full_backbone
+    - partial_backbone
+    - early_only
+    - full_finetune
+  lr0: [1.0e-4, 1.0e-2]       # log-scale float range
   geometry:
     perspective: [0.0, 0.003]
     scale: [0.1, 0.5]
@@ -72,6 +72,7 @@ compute:
   workers: 4
   batch: 16
   imgsz: 640
+  seed: 42                  # global RNG seed for training, Optuna, and run_id derivation
 
 logging:
   verbose: false

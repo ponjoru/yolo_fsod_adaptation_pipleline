@@ -16,6 +16,20 @@ import yaml
 _FRAME_RE = re.compile(r"_(\d+)\.[^.]+$")
 
 
+def resolve_freeze_bn(cfg: dict, n_train_images: int) -> bool:
+    """Resolve freeze_bn config value to a concrete bool.
+
+    Accepts true | false | auto. When auto, returns True if
+    n_train_images < freeze_bn_auto_threshold (BN batch statistics
+    are unreliable on very small datasets).
+    """
+    val = cfg["grid_search"]["freeze_bn"]
+    if val == "auto":
+        threshold = cfg["grid_search"].get("freeze_bn_auto_threshold", 100)
+        return n_train_images < threshold
+    return bool(val)
+
+
 def parse_frame_index(filename: str) -> int:
     """Parse frame index from '{video_id}_{frame_id}.ext' filenames."""
     m = _FRAME_RE.search(Path(filename).name)

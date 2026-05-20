@@ -1,15 +1,30 @@
-"""Phase 2 — Bayesian optimisation over geometry augmentation hyperparameters (Optuna)."""
+"""Phase 2 — Joint Bayesian optimisation over the full training recipe.
+
+Fixes the model architecture selected in Phase 1 and jointly searches:
+  epochs       [int]         — training length
+  freeze       [categorical] — freeze strategy
+  lr0          [log-float]   — initial learning rate
+  perspective  [float]       — geometry augmentation
+  scale        [float]       — geometry augmentation
+  translate    [float]       — geometry augmentation
+  degrees      [float]       — geometry augmentation (rotation)
+
+Optuna SQLite storage is used so a crashed run can be resumed cleanly
+by re-running the pipeline with the same run_id / config.
+"""
 
 from __future__ import annotations
-import optuna
+
 import logging
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import optuna
+
 from .dataset import FoldPaths
-from .grid_search import RecipeResult
+from .grid_search import ModelSelectionResult
 from .head_init import HeadInitializer
 from .robustness import RobustnessEvaluator
 from .scoring import compute_composite_score
@@ -20,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BayesianResult:
+    # Optimisation recipe
+    epochs: int
+    freeze: str
+    lr0: float
+    # Geometry augmentations
     perspective: float
     scale: float
     translate: float
@@ -28,50 +48,48 @@ class BayesianResult:
 
 
 class BayesianSearcher:
-    """Optimise geometry augmentation params with Optuna, fixing phase-1 recipe."""
+    """Phase 2: joint Bayesian search over epochs, freeze, lr0, and geometry augs."""
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
         self.bs_cfg = cfg["bayesian_search"]
         self.n_trials: int = self.bs_cfg["n_trials"]
-        self.geo_bounds: Dict = self.bs_cfg["geometry"]
         self.metric_key = "map50" if cfg["scoring"]["metric"] == "map50" else "map"
         self.run_dir = str(Path(cfg["logging"]["save_dir"]) / "bayesian_search")
 
     def run(
         self,
-        best_recipe: RecipeResult,
+        model_result: ModelSelectionResult,
         folds: List[FoldPaths],
         head_initializer: Optional[HeadInitializer] = None,
         class_names: Optional[List[str]] = None,
         nc: Optional[int] = None,
     ) -> BayesianResult:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        model_name = model_result.model_name
+        freeze_bn = model_result.freeze_bn
         robustness_evaluator = RobustnessEvaluator(self.cfg)
 
+        epochs_min, epochs_max = self.bs_cfg["epochs"]
+        freeze_choices: List[str] = self.bs_cfg["freeze"]
+        lr0_min, lr0_max = self.bs_cfg["lr0"]
+        geo = self.bs_cfg["geometry"]
+
         def objective(trial: optuna.Trial) -> float:
-            augment_params = {
-                "perspective": trial.suggest_float(
-                    "perspective",
-                    self.geo_bounds["perspective"][0],
-                    self.geo_bounds["perspective"][1],
-                ),
-                "scale": trial.suggest_float(
-                    "scale",
-                    self.geo_bounds["scale"][0],
-                    self.geo_bounds["scale"][1],
-                ),
-                "translate": trial.suggest_float(
-                    "translate",
-                    self.geo_bounds["translate"][0],
-                    self.geo_bounds["translate"][1],
-                ),
-                "degrees": trial.suggest_float(
-                    "rotation",
-                    self.geo_bounds["rotation"][0],
-                    self.geo_bounds["rotation"][1],
-                ),
-            }
+            epochs = trial.suggest_int("epochs", int(epochs_min), int(epochs_max))
+            freeze = trial.suggest_categorical("freeze", freeze_choices)
+            lr0 = trial.suggest_float("lr0", lr0_min, lr0_max, log=True)
+            perspective = trial.suggest_float(
+                "perspective", geo["perspective"][0], geo["perspective"][1]
+            )
+            scale = trial.suggest_float("scale", geo["scale"][0], geo["scale"][1])
+            translate = trial.suggest_float(
+                "translate", geo["translate"][0], geo["translate"][1]
+            )
+            degrees = trial.suggest_float(
+                "degrees", geo["rotation"][0], geo["rotation"][1]
+            )
 
             cv_scores: List[float] = []
             rob_scores: List[float] = []
@@ -80,13 +98,19 @@ class BayesianSearcher:
                 head_cb = head_initializer.make_callback() if head_initializer else None
 
                 result = run_training(
-                    model_name=best_recipe.model_name,
+                    model_name=model_name,
                     data_yaml=fold.data_yaml,
                     fold_idx=fold.fold_idx,
-                    epochs=best_recipe.epochs,
-                    freeze=best_recipe.freeze,
-                    freeze_bn=best_recipe.freeze_bn,
-                    augment_params=augment_params,
+                    epochs=epochs,
+                    freeze=freeze,
+                    freeze_bn=freeze_bn,
+                    lr0=lr0,
+                    augment_params={
+                        "perspective": perspective,
+                        "scale": scale,
+                        "translate": translate,
+                        "degrees": degrees,
+                    },
                     run_dir=self.run_dir,
                     cfg=self.cfg,
                     head_init_callback=head_cb,
@@ -106,31 +130,48 @@ class BayesianSearcher:
                             class_names=class_names,
                         )
                     except Exception as e:
-                        logger.warning(f"Robustness eval failed in Bayesian trial: {e}")
+                        logger.warning(f"Robustness eval failed in trial {trial.number}: {e}")
                 rob_scores.append(rob)
 
             mean_rob = statistics.mean(rob_scores) if rob_scores else 0.0
             return compute_composite_score(cv_scores, mean_rob, self.cfg)
 
+        Path(self.run_dir).mkdir(parents=True, exist_ok=True)
+        storage = f"sqlite:///{self.run_dir}/optuna_study.db"
+
         study = optuna.create_study(
             direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=42),
-            study_name="bayesian_aug_search",
-            storage=None,
+            sampler=optuna.samplers.TPESampler(seed=self.cfg["compute"]["seed"]),
+            study_name="bayesian_search",
+            storage=storage,
+            load_if_exists=True,   # resume transparently after crash
         )
-        study.optimize(objective, n_trials=self.n_trials, show_progress_bar=False)
+
+        remaining = max(0, self.n_trials - len(study.trials))
+        if remaining == 0:
+            logger.info("Bayesian search already complete (loaded from storage).")
+        else:
+            logger.info(
+                f"Bayesian search: {remaining} trials remaining "
+                f"({len(study.trials)} already done)."
+            )
+            study.optimize(objective, n_trials=remaining, show_progress_bar=False)
 
         best = study.best_params
         logger.info(
-            f"Bayesian search best: perspective={best['perspective']:.5f}, "
+            f"Bayesian search best: epochs={best['epochs']}, freeze={best['freeze']}, "
+            f"lr0={best['lr0']:.2e}, perspective={best['perspective']:.5f}, "
             f"scale={best['scale']:.3f}, translate={best['translate']:.3f}, "
-            f"degrees={best['rotation']:.2f} | score={study.best_value:.4f}"
+            f"degrees={best['degrees']:.2f} | score={study.best_value:.4f}"
         )
 
         return BayesianResult(
+            epochs=best["epochs"],
+            freeze=best["freeze"],
+            lr0=best["lr0"],
             perspective=best["perspective"],
             scale=best["scale"],
             translate=best["translate"],
-            degrees=best["rotation"],
+            degrees=best["degrees"],
             best_score=study.best_value,
         )

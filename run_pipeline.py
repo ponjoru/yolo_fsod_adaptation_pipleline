@@ -7,8 +7,8 @@ Usage:
 
 Runs:
   1. Dataset construction + temporal CV fold generation
-  2. Phase 1: grid search  (model × epochs × freeze × freeze_bn)
-  3. Phase 2: Bayesian search (geometry augmentation)
+  2. Phase 1: model selection  (model × 3 folds, fixed baseline hyperparameters)
+  3. Phase 2: joint Bayesian search (epochs, freeze, lr0, geometry augmentation)
   4. Final retrain on full dataset
   5. ONNX export
 """
@@ -16,15 +16,14 @@ Runs:
 from __future__ import annotations
 
 import argparse
-import datetime
 import logging
 import sys
 from pathlib import Path
 
-from pipeline.config import load_config
+from pipeline.config import load_config, generate_run_id
 from pipeline.dataset import DatasetBuilder
 from pipeline.export import export_onnx
-from pipeline.grid_search import GridSearcher
+from pipeline.grid_search import GridSearcher, ModelSelectionResult
 from pipeline.bayesian_search import BayesianSearcher
 from pipeline.head_init import HeadInitializer
 from pipeline.trainer import run_training
@@ -84,7 +83,7 @@ def main() -> None:
 
     cfg = load_config(args.ml_config, args.user_config)
 
-    run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = generate_run_id(cfg)
     _setup_logging(cfg, run_id)
     log = logging.getLogger(__name__)
 
@@ -115,38 +114,40 @@ def main() -> None:
         log.info(f"  Class mapping: {cfg['classes']['mapping']}")
 
     # -----------------------------------------------------------------------
-    # Phase 1: Grid search
+    # Phase 1: Model selection
     # -----------------------------------------------------------------------
-    log.info("[2/5] Phase 1: Grid search...")
+    log.info("[2/5] Phase 1: Model selection...")
     grid_searcher = GridSearcher(cfg)
-    best_recipe = grid_searcher.run(
+    model_result: ModelSelectionResult = grid_searcher.run(
         folds=folds,
         head_initializer=head_initializer,
         class_names=class_names,
         nc=nc,
     )
     log.info(
-        f"  Best recipe → model={best_recipe.model_name}, epochs={best_recipe.epochs}, "
-        f"freeze={best_recipe.freeze}, freeze_bn={best_recipe.freeze_bn} | "
-        f"composite_score={best_recipe.composite_score:.4f}"
+        f"  Best model → {model_result.model_name} | "
+        f"freeze_bn={model_result.freeze_bn}, "
+        f"composite_score={model_result.composite_score:.4f}"
     )
 
     # -----------------------------------------------------------------------
-    # Phase 2: Bayesian search (geometry augmentation)
+    # Phase 2: Joint Bayesian search (epochs, freeze, lr0, geometry)
     # -----------------------------------------------------------------------
-    log.info("[3/5] Phase 2: Bayesian augmentation search...")
+    log.info("[3/5] Phase 2: Joint Bayesian search...")
     bayesian_searcher = BayesianSearcher(cfg)
-    best_aug = bayesian_searcher.run(
-        best_recipe=best_recipe,
+    best_recipe = bayesian_searcher.run(
+        model_result=model_result,
         folds=folds,
         head_initializer=head_initializer,
         class_names=class_names,
         nc=nc,
     )
     log.info(
-        f"  Best augmentation → perspective={best_aug.perspective:.5f}, "
-        f"scale={best_aug.scale:.3f}, translate={best_aug.translate:.3f}, "
-        f"degrees={best_aug.degrees:.2f} | score={best_aug.best_score:.4f}"
+        f"  Best recipe → epochs={best_recipe.epochs}, freeze={best_recipe.freeze}, "
+        f"lr0={best_recipe.lr0:.2e} | "
+        f"perspective={best_recipe.perspective:.5f}, scale={best_recipe.scale:.3f}, "
+        f"translate={best_recipe.translate:.3f}, degrees={best_recipe.degrees:.2f} | "
+        f"score={best_recipe.best_score:.4f}"
     )
 
     # -----------------------------------------------------------------------
@@ -158,17 +159,18 @@ def main() -> None:
     head_cb = head_initializer.make_callback() if head_initializer else None
 
     final_result = run_training(
-        model_name=best_recipe.model_name,
+        model_name=model_result.model_name,
         data_yaml=full_fold.data_yaml,
         fold_idx=-1,
         epochs=best_recipe.epochs,
         freeze=best_recipe.freeze,
-        freeze_bn=best_recipe.freeze_bn,
+        freeze_bn=model_result.freeze_bn,
+        lr0=best_recipe.lr0,
         augment_params={
-            "perspective": best_aug.perspective,
-            "scale": best_aug.scale,
-            "translate": best_aug.translate,
-            "degrees": best_aug.degrees,
+            "perspective": best_recipe.perspective,
+            "scale": best_recipe.scale,
+            "translate": best_recipe.translate,
+            "degrees": best_recipe.degrees,
         },
         run_dir=final_run_dir,
         cfg=cfg,

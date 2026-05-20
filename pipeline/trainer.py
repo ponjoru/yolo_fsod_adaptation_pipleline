@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-import torch.nn as nn
 import logging
 import os
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
 from ultralytics import YOLO
 import ultralytics.utils as uu
       
@@ -40,6 +44,16 @@ def _suppress_ultralytics_output(verbose: bool) -> None:
         uu.LOGGER.setLevel(logging.WARNING)
 
 
+def _set_global_seeds(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    # benchmark=False is required for determinism; trades ~10% throughput for reproducibility
+    torch.backends.cudnn.benchmark = False
+
+
 def _make_freeze_bn_callback():
     def on_train_epoch_start(trainer):
         # Keep BN layers in eval mode so they use running stats, not batch stats
@@ -58,6 +72,7 @@ def run_training(
     epochs: int,
     freeze: str,
     freeze_bn: bool,
+    lr0: float = 0.01,
     augment_params: Dict[str, Any],
     run_dir: str,
     cfg: Dict[str, Any],
@@ -66,7 +81,9 @@ def run_training(
     """Train one YOLO model for one fold. Returns TrainResult with metrics."""
 
     verbose = cfg["logging"]["verbose"]
+    seed = cfg["compute"]["seed"]
     _suppress_ultralytics_output(verbose)
+    _set_global_seeds(seed)
 
     n_freeze = FREEZE_STRATEGIES.get(freeze, 0)
     device = cfg["compute"]["device"]
@@ -98,6 +115,8 @@ def run_training(
         "exist_ok": True,
         "verbose": verbose,
         "patience": 0,           # disable early stopping in search phase
+        "seed": seed,
+        "lr0": lr0,
         "save": True,
         "plots": False,
         # Augmentation defaults from ML config
