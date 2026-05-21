@@ -36,6 +36,7 @@ class TrainResult:
     map50: float
     map: float
     weights_path: str
+    save_dir: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -159,6 +160,7 @@ def run_training(
             map50=0.0,
             map=0.0,
             weights_path="",
+            save_dir="",
         )
 
     # Extract metrics from results
@@ -181,4 +183,5 @@ def run_training(
         map50=map50,
         map=map_val,
         weights_path=best_weights,
+        save_dir=str(save_dir),
     )

@@ -29,6 +29,7 @@ from .head_init import HeadInitializer
 from .robustness import RobustnessEvaluator
 from .scoring import compute_composite_score
 from .trainer import run_training
+from .utils import TopKWeightsTracker, append_csv_row, cleanup_run_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +51,12 @@ class BayesianResult:
 class BayesianSearcher:
     """Phase 2: joint Bayesian search over epochs, freeze, lr0, and geometry augs."""
 
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(self, cfg: Dict[str, Any], run_dir: str):
         self.cfg = cfg
         self.bs_cfg = cfg["bayesian_search"]
         self.n_trials: int = self.bs_cfg["n_trials"]
         self.metric_key = "map50" if cfg["scoring"]["metric"] == "map50" else "map"
-        self.run_dir = str(Path(cfg["logging"]["save_dir"]) / "bayesian_search")
+        self.run_dir = run_dir
 
     def run(
         self,
@@ -64,6 +65,8 @@ class BayesianSearcher:
         head_initializer: Optional[HeadInitializer] = None,
         class_names: Optional[List[str]] = None,
         nc: Optional[int] = None,
+        csv_path: Optional[str] = None,
+        weights_tracker: Optional[TopKWeightsTracker] = None,
     ) -> BayesianResult:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -133,8 +136,34 @@ class BayesianSearcher:
                         logger.warning(f"Robustness eval failed in trial {trial.number}: {e}")
                 rob_scores.append(rob)
 
+                # Top-k tracking then cleanup (robustness eval already consumed weights)
+                if weights_tracker and result.save_dir:
+                    run_key = f"trial{trial.number:04d}_fold{fold.fold_idx}"
+                    weights_tracker.consider(score, run_key, result.save_dir)
+                if result.save_dir:
+                    cleanup_run_artifacts(result.save_dir)
+
             mean_rob = statistics.mean(rob_scores) if rob_scores else 0.0
-            return compute_composite_score(cv_scores, mean_rob, self.cfg)
+            composite = compute_composite_score(cv_scores, mean_rob, self.cfg)
+
+            trial.set_user_attr("cv_mean", statistics.mean(cv_scores) if cv_scores else 0.0)
+            trial.set_user_attr("cv_std", statistics.stdev(cv_scores) if len(cv_scores) > 1 else 0.0)
+            trial.set_user_attr("robustness", mean_rob)
+
+            return composite
+
+        def on_trial_complete(
+            study: optuna.Study, trial: optuna.trial.FrozenTrial
+        ) -> None:
+            if trial.state != optuna.trial.TrialState.COMPLETE or csv_path is None:
+                return
+            append_csv_row(csv_path, [
+                f"trial_{trial.number:04d}", "phase2",
+                f"{trial.value:.6f}",
+                f"{trial.user_attrs.get('cv_mean', 0.0):.6f}",
+                f"{trial.user_attrs.get('cv_std', 0.0):.6f}",
+                f"{trial.user_attrs.get('robustness', 0.0):.6f}",
+            ])
 
         Path(self.run_dir).mkdir(parents=True, exist_ok=True)
         storage = f"sqlite:///{self.run_dir}/optuna_study.db"
@@ -144,7 +173,7 @@ class BayesianSearcher:
             sampler=optuna.samplers.TPESampler(seed=self.cfg["compute"]["seed"]),
             study_name="bayesian_search",
             storage=storage,
-            load_if_exists=True,   # resume transparently after crash
+            load_if_exists=True,
         )
 
         remaining = max(0, self.n_trials - len(study.trials))
@@ -155,7 +184,12 @@ class BayesianSearcher:
                 f"Bayesian search: {remaining} trials remaining "
                 f"({len(study.trials)} already done)."
             )
-            study.optimize(objective, n_trials=remaining, show_progress_bar=False)
+            study.optimize(
+                objective,
+                n_trials=remaining,
+                callbacks=[on_trial_complete],
+                show_progress_bar=False,
+            )
 
         best = study.best_params
         logger.info(

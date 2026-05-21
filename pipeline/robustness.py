@@ -1,15 +1,15 @@
 """Synthetic robustness probes: perturb val images, re-evaluate, return mAP.
 
 Debug visualizations:
-  - Phase 1 (first robustness call): saves raw perturbed image mosaics.
-  - Final (after full retraining): saves mosaics with predictions overlaid.
-One JPEG per perturbation type is written to the supplied mosaic_dir.
+  - Phase 1 (first robustness call): saves raw perturbed + letterboxed images, no predictions.
+  - Final (after full retraining): saves the same images with predictions overlaid.
+One JPEG per sample per perturbation type is written under the supplied output dir,
+structured as {output_dir}/{probe_name}/{idx:02d}.jpg.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import random as _random
 import shutil
 import tempfile
@@ -84,7 +84,18 @@ _PERTURBATIONS: Dict[str, callable] = {
     "scale_perturbation": _scale_perturbation,
 }
 
-_MOSAIC_CELL_SIZE = 320  # px per cell in debug mosaics
+
+def _letterbox(img: np.ndarray, size: int = 640) -> np.ndarray:
+    """Resize with aspect-ratio-preserving padding, matching Ultralytics preprocessing."""
+    h, w = img.shape[:2]
+    scale = size / max(h, w)
+    new_h, new_w = int(round(h * scale)), int(round(w * scale))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    out = np.full((size, size, 3), 114, dtype=np.uint8)
+    pad_y = (size - new_h) // 2
+    pad_x = (size - new_w) // 2
+    out[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -94,47 +105,30 @@ _MOSAIC_CELL_SIZE = 320  # px per cell in debug mosaics
 class RobustnessEvaluator:
     """Apply each enabled perturbation to val images and return mean mAP.
 
-    Optionally saves debug mosaic images when mosaic_dir is provided to
+    Optionally saves per-sample debug images when output_dir is provided to
     evaluate(). Sampling is deterministic (seed-based) so Phase 1 and
-    final mosaics always show the same source images.
+    final images always show the same source images.
     """
 
     def __init__(self, cfg: Dict[str, Any]):
         probes_cfg = cfg.get("robustness_probes", {})
-        # Separate the boolean probe flags from non-probe keys
         self.probes_cfg: Dict[str, bool] = {
             k: v for k, v in probes_cfg.items() if k in _PERTURBATIONS
         }
         self.metric: str = cfg["scoring"]["metric"]
         self.compute_cfg = cfg["compute"]
-        self.n_mosaic_samples: int = int(probes_cfg.get("n_mosaic_samples", 4))
+        self.n_sample_images: int = int(probes_cfg.get("n_mosaic_samples", 4))
         self._seed: int = cfg["compute"]["seed"]
 
     # ------------------------------------------------------------------
-    # Mosaic helpers
+    # Helpers
     # ------------------------------------------------------------------
 
     def _select_samples(self, images: List[str]) -> List[str]:
-        """Deterministically select up to n_mosaic_samples images."""
+        """Deterministically select up to n_sample_images images."""
         rng = _random.Random(self._seed)
-        pool = sorted(images)   # sort for filesystem-order independence
-        return rng.sample(pool, min(self.n_mosaic_samples, len(pool)))
-
-    def _build_mosaic(self, cells: List[np.ndarray]) -> np.ndarray:
-        """Tile cell images into a square-ish grid."""
-        n = len(cells)
-        cols = math.ceil(math.sqrt(n))
-        rows = math.ceil(n / cols)
-        s = _MOSAIC_CELL_SIZE
-        blank = np.zeros((s, s, 3), dtype=np.uint8)
-        resized = [cv2.resize(c, (s, s)) for c in cells]
-        # Pad to fill the grid rectangle
-        resized += [blank] * (cols * rows - n)
-        grid_rows = [
-            np.hstack(resized[r * cols: (r + 1) * cols])
-            for r in range(rows)
-        ]
-        return np.vstack(grid_rows)
+        pool = sorted(images)
+        return rng.sample(pool, min(self.n_sample_images, len(pool)))
 
     def _draw_predictions(
         self,
@@ -158,40 +152,36 @@ class RobustnessEvaluator:
                             cv2.LINE_AA)
         return out
 
-    def _save_mosaics(
+    def _save_probe_images(
         self,
         sample_images: List[str],
-        mosaic_dir: str,
+        output_dir: str,
         model=None,
         class_names: Optional[List[str]] = None,
     ) -> None:
-        """Save one mosaic JPEG per enabled probe type to mosaic_dir."""
-        Path(mosaic_dir).mkdir(parents=True, exist_ok=True)
+        """Save one letterboxed image per sample per enabled probe type."""
+        imgsz = self.compute_cfg["imgsz"]
         enabled = [k for k in self.probes_cfg if self.probes_cfg[k]]
 
         for probe_name in enabled:
             perturb_fn = _PERTURBATIONS[probe_name]
-            cells: List[np.ndarray] = []
+            probe_dir = Path(output_dir) / probe_name
+            probe_dir.mkdir(parents=True, exist_ok=True)
 
-            for img_path in sample_images:
+            for idx, img_path in enumerate(sample_images):
                 img = cv2.imread(img_path)
                 if img is None:
                     continue
                 cell = perturb_fn(img)
+                cell = _letterbox(cell, imgsz)
                 if model is not None and class_names:
                     cell = self._draw_predictions(cell, model, class_names)
-                cells.append(cell)
-
-            if not cells:
-                continue
-
-            mosaic = self._build_mosaic(cells)
-            out_path = Path(mosaic_dir) / f"{probe_name}.jpg"
-            cv2.imwrite(str(out_path), mosaic)
-            logger.info(f"  Probe mosaic saved: {out_path}")
+                out_path = probe_dir / f"{idx:02d}.jpg"
+                cv2.imwrite(str(out_path), cell)
+                logger.info(f"  Probe image saved: {out_path}")
 
     # ------------------------------------------------------------------
-    # Main evaluation
+    # Metric evaluation helpers
     # ------------------------------------------------------------------
 
     def _apply_perturbations_to_dir(
@@ -246,6 +236,10 @@ class RobustnessEvaluator:
             yaml.dump(data, f)
         return str(yaml_path)
 
+    # ------------------------------------------------------------------
+    # Main evaluation
+    # ------------------------------------------------------------------
+
     def evaluate(
         self,
         weights_path: str,
@@ -258,8 +252,9 @@ class RobustnessEvaluator:
     ) -> float:
         """Run all enabled probes, return mean mAP.
 
-        If mosaic_dir is set, also saves one debug mosaic per probe type.
-        overlay_predictions=True draws model predictions on the mosaic cells.
+        If mosaic_dir is set, also saves one letterboxed image per sample per
+        probe type under {mosaic_dir}/{probe_name}/{idx:02d}.jpg.
+        overlay_predictions=True draws model predictions on the saved images.
         """
         from ultralytics import YOLO
 
@@ -315,14 +310,13 @@ class RobustnessEvaluator:
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
 
-        # Debug mosaics — saved after metric loop so the model is already loaded
         if mosaic_dir:
             sample_images = self._select_samples(val_images)
             viz_model = model if overlay_predictions else None
             viz_classes = class_names if overlay_predictions else None
             try:
-                self._save_mosaics(sample_images, mosaic_dir, viz_model, viz_classes)
+                self._save_probe_images(sample_images, mosaic_dir, viz_model, viz_classes)
             except Exception as e:
-                logger.warning(f"Mosaic save failed: {e}")
+                logger.warning(f"Probe image save failed: {e}")
 
         return float(np.mean(scores)) if scores else 0.0

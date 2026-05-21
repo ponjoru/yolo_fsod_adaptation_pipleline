@@ -7,7 +7,6 @@ is selected by composite score and passed to Phase 2.
 
 from __future__ import annotations
 
-import itertools
 import json
 import logging
 import statistics
@@ -20,6 +19,7 @@ from .head_init import HeadInitializer
 from .robustness import RobustnessEvaluator
 from .scoring import compute_composite_score
 from .trainer import run_training
+from .utils import TopKWeightsTracker, append_csv_row, cleanup_run_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +38,12 @@ class ModelSelectionResult:
 class GridSearcher:
     """Phase 1: select best model architecture using fixed baseline hyperparameters."""
 
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(self, cfg: Dict[str, Any], run_dir: str):
         self.cfg = cfg
         self.gs_cfg = cfg["grid_search"]
         self.metric_key = "map50" if cfg["scoring"]["metric"] == "map50" else "map"
-        self.run_dir = str(Path(cfg["logging"]["save_dir"]) / "grid_search")
-        self.checkpoint_path = str(Path(self.run_dir) / "results.jsonl")
+        self.run_dir = run_dir
+        self.checkpoint_path = str(Path(run_dir) / "results.jsonl")
 
     def _load_checkpoint(self) -> List[Dict]:
         p = Path(self.checkpoint_path)
@@ -64,6 +64,8 @@ class GridSearcher:
         class_names: Optional[List[str]] = None,
         nc: Optional[int] = None,
         probe_mosaic_dir: Optional[str] = None,
+        csv_path: Optional[str] = None,
+        weights_tracker: Optional[TopKWeightsTracker] = None,
     ) -> ModelSelectionResult:
         baseline = self.gs_cfg["baseline"]
         baseline_epochs: int = baseline["epochs"]
@@ -96,64 +98,84 @@ class GridSearcher:
         _phase1_mosaic_saved = False
 
         run_idx = 0
-        for model_name, fold in itertools.product(models, folds):
-            run_key = f"{model_name}|fold{fold.fold_idx}"
-            run_idx += 1
+        for model_name in models:
+            for fold in folds:
+                run_key = f"{model_name}|fold{fold.fold_idx}"
+                run_idx += 1
 
-            if run_key in done_keys:
-                logger.debug(f"[{run_idx}/{total}] Skip (cached): {run_key}")
-                continue
+                if run_key in done_keys:
+                    logger.debug(f"[{run_idx}/{total}] Skip (cached): {run_key}")
+                    continue
 
-            logger.info(f"[{run_idx}/{total}] Training: {run_key}")
-            head_cb = head_initializer.make_callback() if head_initializer else None
+                logger.info(f"[{run_idx}/{total}] Training: {run_key}")
+                head_cb = head_initializer.make_callback() if head_initializer else None
 
-            result = run_training(
-                model_name=model_name,
-                data_yaml=fold.data_yaml,
-                fold_idx=fold.fold_idx,
-                epochs=baseline_epochs,
-                freeze=baseline_freeze,
-                freeze_bn=freeze_bn,
-                lr0=baseline_lr0,
-                augment_params={},
-                run_dir=self.run_dir,
-                cfg=self.cfg,
-                head_init_callback=head_cb,
-            )
+                result = run_training(
+                    model_name=model_name,
+                    data_yaml=fold.data_yaml,
+                    fold_idx=fold.fold_idx,
+                    epochs=baseline_epochs,
+                    freeze=baseline_freeze,
+                    freeze_bn=freeze_bn,
+                    lr0=baseline_lr0,
+                    augment_params={},
+                    run_dir=self.run_dir,
+                    cfg=self.cfg,
+                    head_init_callback=head_cb,
+                )
 
-            score = result.map50 if self.metric_key == "map50" else result.map
+                score = result.map50 if self.metric_key == "map50" else result.map
 
-            rob = 0.0
-            if class_names and nc and result.weights_path:
-                mosaic_dir = probe_mosaic_dir if (probe_mosaic_dir and not _phase1_mosaic_saved) else None
-                try:
-                    rob = robustness_evaluator.evaluate(
-                        weights_path=result.weights_path,
-                        val_images=fold.val_images,
-                        val_labels=fold.val_labels,
-                        nc=nc,
-                        class_names=class_names,
-                        mosaic_dir=mosaic_dir,
-                        overlay_predictions=False,
-                    )
-                    if mosaic_dir:
-                        _phase1_mosaic_saved = True
-                except Exception as e:
-                    logger.warning(f"Robustness eval failed for {run_key}: {e}")
+                rob = 0.0
+                if class_names and nc and result.weights_path:
+                    mosaic_dir = probe_mosaic_dir if (probe_mosaic_dir and not _phase1_mosaic_saved) else None
+                    try:
+                        rob = robustness_evaluator.evaluate(
+                            weights_path=result.weights_path,
+                            val_images=fold.val_images,
+                            val_labels=fold.val_labels,
+                            nc=nc,
+                            class_names=class_names,
+                            mosaic_dir=mosaic_dir,
+                            overlay_predictions=False,
+                        )
+                        if mosaic_dir:
+                            _phase1_mosaic_saved = True
+                    except Exception as e:
+                        logger.warning(f"Robustness eval failed for {run_key}: {e}")
 
-            record = {
-                "run_key": run_key,
-                "model_name": model_name,
-                "fold_idx": fold.fold_idx,
-                "map50": result.map50,
-                "map": result.map,
-                "score": score,
-                "robustness_score": rob,
-                "weights_path": result.weights_path,
-            }
-            self._append_checkpoint(record)
-            per_model_scores.setdefault(model_name, []).append(score)
-            per_model_rob.setdefault(model_name, []).append(rob)
+                # Top-k tracking then cleanup (robustness eval already consumed weights)
+                if weights_tracker and result.save_dir:
+                    weights_tracker.consider(score, Path(result.save_dir).name, result.save_dir)
+                if result.save_dir:
+                    cleanup_run_artifacts(result.save_dir)
+
+                record = {
+                    "run_key": run_key,
+                    "model_name": model_name,
+                    "fold_idx": fold.fold_idx,
+                    "map50": result.map50,
+                    "map": result.map,
+                    "score": score,
+                    "robustness_score": rob,
+                    "weights_path": result.weights_path,
+                }
+                self._append_checkpoint(record)
+                per_model_scores.setdefault(model_name, []).append(score)
+                per_model_rob.setdefault(model_name, []).append(rob)
+
+            # Write one CSV row per model after all its folds complete
+            if csv_path:
+                fold_scores = per_model_scores.get(model_name, [])
+                rob_scores = per_model_rob.get(model_name, [])
+                mean_rob = statistics.mean(rob_scores) if rob_scores else 0.0
+                composite = compute_composite_score(fold_scores, mean_rob, self.cfg)
+                cv_mean = statistics.mean(fold_scores) if fold_scores else 0.0
+                cv_std = statistics.stdev(fold_scores) if len(fold_scores) > 1 else 0.0
+                append_csv_row(csv_path, [
+                    model_name, "phase1",
+                    f"{composite:.6f}", f"{cv_mean:.6f}", f"{cv_std:.6f}", f"{mean_rob:.6f}",
+                ])
 
         return self._select_best(per_model_scores, per_model_rob, freeze_bn)
 

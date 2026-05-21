@@ -11,14 +11,28 @@ Runs:
   3. Phase 2: joint Bayesian search (epochs, freeze, lr0, geometry augmentation)
   4. Final retrain on full dataset
   5. ONNX export
+
+Output layout under runs/run_<id>/:
+  grid_search/          — train logs for Phase 1 runs
+  bayesian_search/      — train logs for Phase 2 runs
+  final/                — train log for the final full-dataset run
+  robustness_check_images/
+    augmented_images/   — letterboxed perturbed val images (Phase 1, no predictions)
+    final_predictions/  — same images with model predictions overlaid (final model)
+  weights/              — top-k best runs (full Ultralytics run folders)
+  results.csv           — per-run metrics for all phases
+  main.log              — pipeline orchestration log
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import sys
 from pathlib import Path
+
+from loguru import logger
 
 from pipeline.config import load_config, generate_run_id
 from pipeline.dataset import DatasetBuilder
@@ -28,38 +42,38 @@ from pipeline.bayesian_search import BayesianSearcher
 from pipeline.head_init import HeadInitializer
 from pipeline.robustness import RobustnessEvaluator
 from pipeline.trainer import run_training
+from pipeline.utils import TopKWeightsTracker, append_csv_row, cleanup_run_artifacts
 
 
-def _setup_logging(cfg: dict, run_id: str) -> None:
-    save_dir = Path(cfg["logging"]["save_dir"]) / run_id
-    save_dir.mkdir(parents=True, exist_ok=True)
-    log_file = save_dir / "debug.log"
+def _setup_logging(cfg: dict, run_root: Path) -> None:
+    run_root.mkdir(parents=True, exist_ok=True)
+    log_file = run_root / "main.log"
 
-    level = logging.DEBUG if cfg["logging"]["verbose"] else logging.INFO
-    handlers = [
-        logging.FileHandler(log_file),
-        logging.StreamHandler(sys.stdout),
-    ]
-    logging.basicConfig(
+    level = "DEBUG" if cfg["logging"]["verbose"] else "INFO"
+
+    logger.remove()
+    logger.add(
+        sys.stdout,
         level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        handlers=handlers,
-        force=True,
+        colorize=True,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | {message}",
     )
-    logging.getLogger("ultralytics").setLevel(
-        logging.DEBUG if cfg["logging"]["verbose"] else logging.WARNING
+    logger.add(
+        log_file,
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name} | {message}",
     )
+
+    # Suppress Ultralytics stdlib logs from the console
+    logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
 
 def _build_head_initializer(cfg: dict, class_names: list[str]) -> HeadInitializer | None:
     mapping = cfg["classes"].get("mapping", {})
     if not mapping:
-        logging.getLogger(__name__).info(
-            "No class mapping defined — all heads will use random initialization."
-        )
+        logger.info("No class mapping defined — all heads will use random initialization.")
         return None
 
-    # Use the smallest model variant for COCO weight extraction (weights are architecture-specific)
     model_name = cfg["grid_search"]["models"][0]
     weights_file = f"{model_name}.pt"
 
@@ -70,10 +84,19 @@ def _build_head_initializer(cfg: dict, class_names: list[str]) -> HeadInitialize
             class_mapping=mapping,
         )
     except Exception as e:
-        logging.getLogger(__name__).warning(
-            f"HeadInitializer setup failed: {e}. Proceeding with random head init."
-        )
+        logger.warning(f"HeadInitializer setup failed: {e}. Proceeding with random head init.")
         return None
+
+
+def _init_csv(csv_path: str, metric_suffix: str) -> None:
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "run_name", "phase", "score",
+            f"cv_mean_{metric_suffix}",
+            f"cv_std_{metric_suffix}",
+            f"robustness_{metric_suffix}",
+        ])
 
 
 def main() -> None:
@@ -85,71 +108,89 @@ def main() -> None:
     cfg = load_config(args.ml_config, args.user_config)
 
     run_id = generate_run_id(cfg)
-    _setup_logging(cfg, run_id)
-    log = logging.getLogger(__name__)
+    run_root = Path(cfg["logging"]["save_dir"]) / run_id
+    _setup_logging(cfg, run_root)
 
-    log.info("=" * 60)
-    log.info("Auto-Adaptation Pipeline")
-    log.info(f"Run ID: {run_id}")
-    log.info(f"Dataset: {cfg['data']['dataset_dir']}")
-    log.info("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Auto-Adaptation Pipeline")
+    logger.info(f"Run ID: {run_id}")
+    logger.info(f"Dataset: {cfg['data']['dataset_dir']}")
+    logger.info("=" * 60)
 
-    # -----------------------------------------------------------------------
-    # Dataset construction
-    # -----------------------------------------------------------------------
-    log.info("[1/5] Building temporal CV folds...")
+    # ------------------------------------------------------------------
+    # Paths
+    # ------------------------------------------------------------------
+    grid_search_dir  = str(run_root / "grid_search")
+    bayesian_dir     = str(run_root / "bayesian_search")
+    final_dir        = str(run_root / "final")
+    weights_dir      = str(run_root / "weights")
+    augmented_dir    = str(run_root / "robustness_check_images" / "augmented_images")
+    final_pred_dir   = str(run_root / "robustness_check_images" / "final_predictions")
+    csv_path         = str(run_root / "results.csv")
+
+    metric = cfg["scoring"]["metric"]
+    metric_suffix = "map50" if metric == "map50" else "map"
+    _init_csv(csv_path, metric_suffix)
+
+    top_k = cfg["logging"].get("top_k_weights", 3)
+    weights_tracker = TopKWeightsTracker(weights_dir=weights_dir, k=top_k)
+
+    # ------------------------------------------------------------------
+    # 1. Dataset construction
+    # ------------------------------------------------------------------
+    logger.info("[1/5] Building temporal CV folds...")
     builder = DatasetBuilder(cfg)
     folds = builder.build_folds()
 
     class_names = builder.class_names
     nc = builder.nc
-    log.info(f"  Classes ({nc}): {class_names}")
-    log.info(f"  Folds: {len(folds)}, train sizes: {[len(f.train_images) for f in folds]}")
-    log.info(f"  Val sizes: {[len(f.val_images) for f in folds]}")
+    logger.info(f"  Classes ({nc}): {class_names}")
+    logger.info(f"  Folds: {len(folds)}, train sizes: {[len(f.train_images) for f in folds]}")
+    logger.info(f"  Val sizes: {[len(f.val_images) for f in folds]}")
 
-    # -----------------------------------------------------------------------
-    # Head initialization setup
-    # -----------------------------------------------------------------------
     head_initializer = _build_head_initializer(cfg, class_names)
     if head_initializer:
-        log.info(f"  Class mapping: {cfg['classes']['mapping']}")
+        logger.info(f"  Class mapping: {cfg['classes']['mapping']}")
 
-    # -----------------------------------------------------------------------
-    # Debug paths
-    # -----------------------------------------------------------------------
-    debug_root = Path(cfg["logging"]["save_dir"]) / run_id / "debug" / "probes"
+    # ------------------------------------------------------------------
+    # 2. Phase 1: Model selection
+    # ------------------------------------------------------------------
+    logger.info("[2/5] Phase 1: Model selection...")
+    append_csv_row(csv_path, ["--- Phase 1: Grid Search ---", "", "", "", "", ""])
 
-    # -----------------------------------------------------------------------
-    # Phase 1: Model selection
-    # -----------------------------------------------------------------------
-    log.info("[2/5] Phase 1: Model selection...")
-    grid_searcher = GridSearcher(cfg)
+    grid_searcher = GridSearcher(cfg, run_dir=grid_search_dir)
     model_result: ModelSelectionResult = grid_searcher.run(
         folds=folds,
         head_initializer=head_initializer,
         class_names=class_names,
         nc=nc,
-        probe_mosaic_dir=str(debug_root / "phase1"),
+        probe_mosaic_dir=augmented_dir,
+        csv_path=csv_path,
+        weights_tracker=weights_tracker,
     )
-    log.info(
+    logger.info(
         f"  Best model → {model_result.model_name} | "
         f"freeze_bn={model_result.freeze_bn}, "
         f"composite_score={model_result.composite_score:.4f}"
     )
 
-    # -----------------------------------------------------------------------
-    # Phase 2: Joint Bayesian search (epochs, freeze, lr0, geometry)
-    # -----------------------------------------------------------------------
-    log.info("[3/5] Phase 2: Joint Bayesian search...")
-    bayesian_searcher = BayesianSearcher(cfg)
+    # ------------------------------------------------------------------
+    # 3. Phase 2: Joint Bayesian search
+    # ------------------------------------------------------------------
+    logger.info("[3/5] Phase 2: Joint Bayesian search...")
+    append_csv_row(csv_path, ["--- Phase 2: Bayesian Search ---", "", "", "", "", ""])
+
+    bayesian_searcher = BayesianSearcher(cfg, run_dir=bayesian_dir)
     best_recipe = bayesian_searcher.run(
         model_result=model_result,
         folds=folds,
         head_initializer=head_initializer,
         class_names=class_names,
         nc=nc,
+        csv_path=csv_path,
+        weights_tracker=weights_tracker,
     )
-    log.info(
+    logger.info(
         f"  Best recipe → epochs={best_recipe.epochs}, freeze={best_recipe.freeze}, "
         f"lr0={best_recipe.lr0:.2e} | "
         f"perspective={best_recipe.perspective:.5f}, scale={best_recipe.scale:.3f}, "
@@ -157,12 +198,13 @@ def main() -> None:
         f"score={best_recipe.best_score:.4f}"
     )
 
-    # -----------------------------------------------------------------------
-    # Final training on full dataset
-    # -----------------------------------------------------------------------
-    log.info("[4/5] Final training on full dataset...")
+    # ------------------------------------------------------------------
+    # 4. Final training on full dataset
+    # ------------------------------------------------------------------
+    logger.info("[4/5] Final training on full dataset...")
+    append_csv_row(csv_path, ["--- Final Training ---", "", "", "", "", ""])
+
     full_fold = builder.build_full_train()
-    final_run_dir = str(Path(cfg["logging"]["save_dir"]) / "final" / run_id)
     head_cb = head_initializer.make_callback() if head_initializer else None
 
     final_result = run_training(
@@ -179,18 +221,19 @@ def main() -> None:
             "translate": best_recipe.translate,
             "degrees": best_recipe.degrees,
         },
-        run_dir=final_run_dir,
+        run_dir=final_dir,
         cfg=cfg,
         head_init_callback=head_cb,
     )
-    log.info(
+    logger.info(
         f"  Final training done: mAP50={final_result.map50:.4f}, "
         f"mAP={final_result.map:.4f}"
     )
 
-    # Final robustness evaluation with prediction overlays on mosaics
+    # Final robustness evaluation — must happen before cleanup so weights are available
+    final_rob = 0.0
     if final_result.weights_path and Path(final_result.weights_path).exists():
-        log.info("  Running final robustness evaluation...")
+        logger.info("  Running final robustness evaluation...")
         robustness_evaluator = RobustnessEvaluator(cfg)
         final_rob = robustness_evaluator.evaluate(
             weights_path=final_result.weights_path,
@@ -198,19 +241,23 @@ def main() -> None:
             val_labels=folds[0].val_labels,
             nc=nc,
             class_names=class_names,
-            mosaic_dir=str(debug_root / "final"),
+            mosaic_dir=final_pred_dir,
             overlay_predictions=True,
         )
-        log.info(f"  Final robustness score: {final_rob:.4f}")
+        logger.info(f"  Final robustness score: {final_rob:.4f}")
 
-    DatasetBuilder.cleanup_fold(full_fold)
+    final_score = final_result.map50 if metric == "map50" else final_result.map
+    append_csv_row(csv_path, [
+        "final", "final",
+        f"{final_score:.6f}", f"{final_score:.6f}", "0.000000", f"{final_rob:.6f}",
+    ])
 
-    # -----------------------------------------------------------------------
-    # ONNX export
-    # -----------------------------------------------------------------------
-    log.info("[5/5] Exporting to ONNX...")
+    # ------------------------------------------------------------------
+    # 5. ONNX export — before cleanup so weights_path is still valid
+    # ------------------------------------------------------------------
+    logger.info("[5/5] Exporting to ONNX...")
     if not final_result.weights_path or not Path(final_result.weights_path).exists():
-        log.error("Final weights not found — export skipped.")
+        logger.error("Final weights not found — export skipped.")
         sys.exit(1)
 
     onnx_path = export_onnx(
@@ -219,17 +266,23 @@ def main() -> None:
         imgsz=cfg["compute"]["imgsz"],
         run_id=run_id,
     )
-    log.info(f"  ONNX model: {onnx_path}")
+    logger.info(f"  ONNX model: {onnx_path}")
 
-    # Clean up fold temp dirs
+    # Top-k tracking + cleanup — after export so weights_path is still valid above
+    if final_result.save_dir:
+        weights_tracker.consider(final_score, Path(final_result.save_dir).name, final_result.save_dir)
+        cleanup_run_artifacts(final_result.save_dir)
+
+    DatasetBuilder.cleanup_fold(full_fold)
     for fold in folds:
         DatasetBuilder.cleanup_fold(fold)
 
-    log.info("=" * 60)
-    log.info("Pipeline complete.")
-    log.info(f"  ONNX output : {onnx_path}")
-    log.info(f"  Debug log   : {Path(cfg['logging']['save_dir']) / run_id / 'debug.log'}")
-    log.info("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Pipeline complete.")
+    logger.info(f"  ONNX output : {onnx_path}")
+    logger.info(f"  Run dir     : {run_root}")
+    logger.info(f"  Main log    : {run_root / 'main.log'}")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

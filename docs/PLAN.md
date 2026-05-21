@@ -518,6 +518,84 @@ This replaces the previous approach of silencing Ultralytics output entirely via
 
 ---
 
+# Update V2
+
+## Structured Run Output Directory
+
+All outputs for a pipeline run are now co-located under a single root:
+
+```text
+runs/
+  run_<id>/
+    grid_search/          — one subfolder per Phase 1 training run; train.log only (artifacts deleted)
+    bayesian_search/      — one subfolder per Phase 2 trial fold; train.log only (artifacts deleted)
+    final/                — train.log for the full-dataset retraining run
+    robustness_check_images/
+      augmented_images/   — letterboxed perturbed val images from Phase 1 (no predictions)
+      final_predictions/  — same images with final model predictions overlaid
+    weights/              — top-k best training runs (full Ultralytics run folders)
+    results.csv           — per-run metrics across all phases
+    main.log              — pipeline orchestration log
+```
+
+`run_<id>` is the deterministic run ID derived from the stable config hash (see Section 11).
+
+---
+
+## Robustness Probe Visualizations Revised
+
+The previous mosaic grid format is replaced with individual per-sample files:
+
+- One JPEG per sample per perturbation type: `{phase_dir}/{probe_name}/{idx:02d}.jpg`
+- Images are letterboxed to `imgsz` with gray padding (fill value 114) before saving, matching Ultralytics' internal preprocessing — what you see is what the model receives
+- Phase 1 images: perturbed only, no predictions
+- Final images: perturbed + model prediction boxes overlaid
+
+---
+
+## Artifact Cleanup and Top-k Weights
+
+To keep disk usage bounded, Ultralytics run artifacts are deleted after each training run. Only `train.log` is retained in place.
+
+Before deletion, runs are evaluated for top-k retention:
+
+- `top_k_weights` (default 3, configurable via `logging.top_k_weights`) controls how many runs to keep
+- Tracked using a min-heap; when a new run arrives, it displaces the lowest-scoring kept run if it scores higher
+- The entire Ultralytics run folder (weights, results, plots) is copied to `weights/{run_name}/` for kept runs
+- Scoring for top-k uses the per-fold raw metric (map50 or map); this applies to both Phase 1 and Phase 2 fold-level runs
+- The final retraining run is also subject to top-k evaluation; export happens before cleanup so weights remain available
+
+---
+
+## results.csv
+
+A CSV is written progressively throughout the run:
+
+- Header field names reflect the configured metric: `cv_mean_map50` / `cv_mean_map`, etc.
+- Columns: `run_name`, `phase`, `score`, `cv_mean_{metric}`, `cv_std_{metric}`, `robustness_{metric}`
+- Phase 1 writes one row per model (after all its folds complete), Phase 2 writes one row per trial (via Optuna callback), final training writes one row
+- Text separator rows (`--- Phase 1: Grid Search ---`, etc.) divide the phases for readability
+
+---
+
+## Ultralytics Log Suppression in Main Console
+
+Ultralytics stdout output is suppressed in the main console via `logging.getLogger("ultralytics").setLevel(WARNING)`. Per-run verbose output is still captured in each run's `train.log` (see Update V1).
+
+---
+
+## Loguru for Main Pipeline Logging
+
+The main pipeline entrypoint (`run_pipeline.py`) uses [loguru](https://github.com/Delgan/loguru) instead of stdlib `logging`:
+
+- Two sinks: colored stdout (level controlled by `logging.verbose`) and a plain `main.log` file (always DEBUG)
+- Console format: `HH:mm:ss | LEVEL | message` — clean and readable during interactive runs
+- File format: `YYYY-MM-DD HH:mm:ss | LEVEL | name | message` — full context for post-run inspection
+- Stdlib `logging` is retained only for the single Ultralytics suppression line (`logging.getLogger("ultralytics").setLevel(WARNING)`); all pipeline log calls use loguru
+- The per-run Ultralytics `train.log` redirection in `trainer.py` is unchanged — it uses stdlib directly against `uu.LOGGER`
+
+---
+
 # Future Work (Not In Scope Now)
 
 ## Frame Sampling Integration

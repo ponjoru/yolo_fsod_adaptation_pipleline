@@ -7,6 +7,7 @@ from .scoring import compute_composite_score
 from .grid_search import GridSearcher, ModelSelectionResult
 from .bayesian_search import BayesianSearcher
 from .export import export_onnx
+from .utils import TopKWeightsTracker, cleanup_run_artifacts, append_csv_row
 
 __all__ = [
     "load_config",
@@ -20,4 +21,7 @@ __all__ = [
     "ModelSelectionResult",
     "BayesianSearcher",
     "export_onnx",
+    "TopKWeightsTracker",
+    "cleanup_run_artifacts",
+    "append_csv_row",
 ]
