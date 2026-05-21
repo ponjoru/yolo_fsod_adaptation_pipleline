@@ -63,6 +63,7 @@ class GridSearcher:
         head_initializer: Optional[HeadInitializer] = None,
         class_names: Optional[List[str]] = None,
         nc: Optional[int] = None,
+        probe_mosaic_dir: Optional[str] = None,
     ) -> ModelSelectionResult:
         baseline = self.gs_cfg["baseline"]
         baseline_epochs: int = baseline["epochs"]
@@ -92,6 +93,7 @@ class GridSearcher:
         logger.info(f"Grid search: {total} total runs, {done_count} already done.")
 
         robustness_evaluator = RobustnessEvaluator(self.cfg)
+        _phase1_mosaic_saved = False
 
         run_idx = 0
         for model_name, fold in itertools.product(models, folds):
@@ -123,6 +125,7 @@ class GridSearcher:
 
             rob = 0.0
             if class_names and nc and result.weights_path:
+                mosaic_dir = probe_mosaic_dir if (probe_mosaic_dir and not _phase1_mosaic_saved) else None
                 try:
                     rob = robustness_evaluator.evaluate(
                         weights_path=result.weights_path,
@@ -130,7 +133,11 @@ class GridSearcher:
                         val_labels=fold.val_labels,
                         nc=nc,
                         class_names=class_names,
+                        mosaic_dir=mosaic_dir,
+                        overlay_predictions=False,
                     )
+                    if mosaic_dir:
+                        _phase1_mosaic_saved = True
                 except Exception as e:
                     logger.warning(f"Robustness eval failed for {run_key}: {e}")
 

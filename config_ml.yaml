@@ -62,6 +62,7 @@ robustness_probes:
   compression: true
   brightness_shift: true
   scale_perturbation: true
+  n_mosaic_samples: 4        # images per probe mosaic (phase1 + final debug output)
 
 export:
   format: onnx

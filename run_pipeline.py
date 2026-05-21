@@ -26,6 +26,7 @@ from pipeline.export import export_onnx
 from pipeline.grid_search import GridSearcher, ModelSelectionResult
 from pipeline.bayesian_search import BayesianSearcher
 from pipeline.head_init import HeadInitializer
+from pipeline.robustness import RobustnessEvaluator
 from pipeline.trainer import run_training
 
 
@@ -114,6 +115,11 @@ def main() -> None:
         log.info(f"  Class mapping: {cfg['classes']['mapping']}")
 
     # -----------------------------------------------------------------------
+    # Debug paths
+    # -----------------------------------------------------------------------
+    debug_root = Path(cfg["logging"]["save_dir"]) / run_id / "debug" / "probes"
+
+    # -----------------------------------------------------------------------
     # Phase 1: Model selection
     # -----------------------------------------------------------------------
     log.info("[2/5] Phase 1: Model selection...")
@@ -123,6 +129,7 @@ def main() -> None:
         head_initializer=head_initializer,
         class_names=class_names,
         nc=nc,
+        probe_mosaic_dir=str(debug_root / "phase1"),
     )
     log.info(
         f"  Best model → {model_result.model_name} | "
@@ -180,6 +187,21 @@ def main() -> None:
         f"  Final training done: mAP50={final_result.map50:.4f}, "
         f"mAP={final_result.map:.4f}"
     )
+
+    # Final robustness evaluation with prediction overlays on mosaics
+    if final_result.weights_path and Path(final_result.weights_path).exists():
+        log.info("  Running final robustness evaluation...")
+        robustness_evaluator = RobustnessEvaluator(cfg)
+        final_rob = robustness_evaluator.evaluate(
+            weights_path=final_result.weights_path,
+            val_images=folds[0].val_images,
+            val_labels=folds[0].val_labels,
+            nc=nc,
+            class_names=class_names,
+            mosaic_dir=str(debug_root / "final"),
+            overlay_predictions=True,
+        )
+        log.info(f"  Final robustness score: {final_rob:.4f}")
 
     DatasetBuilder.cleanup_fold(full_fold)
 

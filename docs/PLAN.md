@@ -394,7 +394,7 @@ Dependencies are pinned to minor versions (`~=`) in `requirements.txt`. Torch is
 
 # 12. Logging
 
-- Logs are saved alongside run output: `{output_dir}/{run_id}/debug.log`
+- Logs are saved alongside run output: `{save_dir}/{run_id}/debug.log`
 - Controlled by `logging.verbose` flag in ML config (default: false)
 - Not shown to end user — intended for ML engineer debugging only
 - Per-trial metrics are logged for post-hoc analysis
@@ -476,6 +476,45 @@ This IS intended to:
 - minimize manual ML involvement
 - support scalable presale workflows
 - produce predictable/stable behaviour
+
+---
+
+# Update V1
+
+## Robustness Probe Debug Visualizations
+
+One mosaic image is saved **per perturbation type** (6 files total per save point) for visual inspection by the ML engineer. Saved to `{save_dir}/{run_id}/debug/probes/`.
+
+### Phase 1 — raw augmented images (no predictions)
+
+Saved once, during the robustness evaluation of the **first model, first fold** in Phase 1. No inference is run; the mosaic shows only the perturbed images. Purpose: verify that each perturbation looks correct on this specific dataset before the full search begins.
+
+- Subfolder: `debug/probes/phase1/{probe_name}.jpg`
+- Content: grid of up to N sample validation images after perturbation (N configurable, default 4)
+- No bounding boxes
+
+### Final retraining — predictions overlaid
+
+Saved once, during the robustness evaluation of the **final trained model** (after full-dataset retraining). Each mosaic shows perturbed images with predicted bounding boxes drawn on top.
+
+- Subfolder: `debug/probes/final/{probe_name}.jpg`
+- Content: same N sample images, with model predictions rendered (box + class label + confidence)
+- Allows the engineer to see directly how the shipped model responds to each perturbation type
+
+Both save points use the same N sample images (selected once, held fixed) so Phase 1 and final mosaics are directly comparable.
+
+---
+
+## Per-training Ultralytics Log Redirection
+
+Ultralytics internal output (training progress, loss curves, val metrics per epoch) is **not suppressed** — it is redirected to a dedicated log file for each training run, keeping the main console clean.
+
+- Saved to `{run_dir}/{run_name}/train.log`
+- Captures at DEBUG level — full Ultralytics verbosity, including per-epoch metrics
+- The Ultralytics logger's console StreamHandler is replaced with a FileHandler pointing to this file; no Ultralytics output reaches stdout
+- Separate from the main `debug.log` — can be inspected independently per trial if a specific run needs investigation
+
+This replaces the previous approach of silencing Ultralytics output entirely via `setLevel(WARNING)`.
 
 ---
 

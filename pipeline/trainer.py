@@ -39,9 +39,22 @@ class TrainResult:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
-def _suppress_ultralytics_output(verbose: bool) -> None:
-    if not verbose:
-        uu.LOGGER.setLevel(logging.WARNING)
+def _redirect_ultralytics_to_file(log_path: str) -> None:
+    """Redirect all Ultralytics logging to a per-run file, away from the console."""
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    ul_logger = uu.LOGGER
+    for handler in ul_logger.handlers[:]:
+        try:
+            handler.flush()
+            handler.close()
+        except Exception:
+            pass
+        ul_logger.removeHandler(handler)
+    fh = logging.FileHandler(log_path, mode="w")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
+    ul_logger.addHandler(fh)
+    ul_logger.setLevel(logging.DEBUG)
 
 
 def _set_global_seeds(seed: int) -> None:
@@ -82,7 +95,8 @@ def run_training(
 
     verbose = cfg["logging"]["verbose"]
     seed = cfg["compute"]["seed"]
-    _suppress_ultralytics_output(verbose)
+    run_name = f"fold{fold_idx}_{model_name}_ep{epochs}_{freeze}_fbn{int(freeze_bn)}"
+    _redirect_ultralytics_to_file(str(Path(run_dir) / run_name / "train.log"))
     _set_global_seeds(seed)
 
     n_freeze = FREEZE_STRATEGIES.get(freeze, 0)
@@ -111,7 +125,7 @@ def run_training(
         "batch": batch,
         "imgsz": imgsz,
         "project": run_dir,
-        "name": f"fold{fold_idx}_{model_name}_ep{epochs}_{freeze}_fbn{int(freeze_bn)}",
+        "name": run_name,
         "exist_ok": True,
         "verbose": verbose,
         "patience": 0,           # disable early stopping in search phase
