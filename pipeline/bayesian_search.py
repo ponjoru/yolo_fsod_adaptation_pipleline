@@ -155,14 +155,25 @@ class BayesianSearcher:
         def on_trial_complete(
             study: optuna.Study, trial: optuna.trial.FrozenTrial
         ) -> None:
-            if trial.state != optuna.trial.TrialState.COMPLETE or csv_path is None:
+            if trial.state != optuna.trial.TrialState.COMPLETE:
+                return
+            cv_mean = trial.user_attrs.get("cv_mean", 0.0)
+            cv_std  = trial.user_attrs.get("cv_std", 0.0)
+            rob     = trial.user_attrs.get("robustness", 0.0)
+            logger.info(
+                f"Trial {trial.number + 1:>4d}/{self.n_trials} | "
+                f"score={trial.value:.4f} | "
+                f"{self.metric_key}={cv_mean:.4f} ± {cv_std:.4f} | "
+                f"rob={rob:.4f}"
+            )
+            if csv_path is None:
                 return
             append_csv_row(csv_path, [
                 f"trial_{trial.number:04d}", "phase2",
                 f"{trial.value:.6f}",
-                f"{trial.user_attrs.get('cv_mean', 0.0):.6f}",
-                f"{trial.user_attrs.get('cv_std', 0.0):.6f}",
-                f"{trial.user_attrs.get('robustness', 0.0):.6f}",
+                f"{cv_mean:.6f}",
+                f"{cv_std:.6f}",
+                f"{rob:.6f}",
             ])
 
         Path(self.run_dir).mkdir(parents=True, exist_ok=True)

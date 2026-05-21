@@ -178,7 +178,7 @@ class RobustnessEvaluator:
                     cell = self._draw_predictions(cell, model, class_names)
                 out_path = probe_dir / f"{idx:02d}.jpg"
                 cv2.imwrite(str(out_path), cell)
-                logger.info(f"  Probe image saved: {out_path}")
+                logger.debug(f"  Probe image saved: {out_path}")
 
     # ------------------------------------------------------------------
     # Metric evaluation helpers
@@ -303,7 +303,7 @@ class RobustnessEvaluator:
                     )
                     metrics = results.results_dict if hasattr(results, "results_dict") else {}
                     score = float(metrics.get(metric_key, 0.0))
-                    logger.info(f"  Probe [{probe_name}]: {self.metric} = {score:.4f}")
+                    logger.debug(f"  Probe [{probe_name}]: {self.metric} = {score:.4f}")
                     scores.append(score)
                 except Exception as e:
                     logger.warning(f"Probe {probe_name} failed: {e}")

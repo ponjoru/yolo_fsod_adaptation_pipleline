@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import random
@@ -40,6 +41,24 @@ class TrainResult:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+def suppress_ultralytics_console() -> None:
+    """Strip all uu.LOGGER handlers and disable tqdm/rich bars at startup.
+
+    Must be called once after ultralytics is imported and before any YOLO call.
+    _redirect_ultralytics_to_file() re-applies VERBOSE=False per training run,
+    but this covers the window before the first run (e.g. HeadInitializer).
+    """
+    for handler in uu.LOGGER.handlers[:]:
+        try:
+            handler.flush()
+            handler.close()
+        except Exception:
+            pass
+        uu.LOGGER.removeHandler(handler)
+    uu.LOGGER.propagate = False
+    uu.VERBOSE = False
+
+
 def _redirect_ultralytics_to_file(log_path: str) -> None:
     """Redirect all Ultralytics logging to a per-run file, away from the console."""
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
@@ -56,6 +75,8 @@ def _redirect_ultralytics_to_file(log_path: str) -> None:
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
     ul_logger.addHandler(fh)
     ul_logger.setLevel(logging.DEBUG)
+    ul_logger.propagate = False
+    uu.VERBOSE = False
 
 
 def _set_global_seeds(seed: int) -> None:
@@ -97,7 +118,8 @@ def run_training(
     verbose = cfg["logging"]["verbose"]
     seed = cfg["compute"]["seed"]
     run_name = f"fold{fold_idx}_{model_name}_ep{epochs}_{freeze}_fbn{int(freeze_bn)}"
-    _redirect_ultralytics_to_file(str(Path(run_dir) / run_name / "train.log"))
+    log_path = str(Path(run_dir) / run_name / "train.log")
+    _redirect_ultralytics_to_file(log_path)
     _set_global_seeds(seed)
 
     n_freeze = FREEZE_STRATEGIES.get(freeze, 0)
@@ -148,7 +170,8 @@ def run_training(
             train_kwargs[key] = augment_params[key]
 
     try:
-        results = model.train(**train_kwargs)
+        with open(log_path, "a") as _stderr_sink, contextlib.redirect_stderr(_stderr_sink):
+            results = model.train(**train_kwargs)
     except Exception as e:
         logger.error(f"Training failed (fold={fold_idx}, model={model_name}): {e}")
         return TrainResult(

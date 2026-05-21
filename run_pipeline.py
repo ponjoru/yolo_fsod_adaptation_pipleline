@@ -40,9 +40,25 @@ from pipeline.export import export_onnx
 from pipeline.grid_search import GridSearcher, ModelSelectionResult
 from pipeline.bayesian_search import BayesianSearcher
 from pipeline.head_init import HeadInitializer
+from pipeline.demo import run_demo_inference
 from pipeline.robustness import RobustnessEvaluator
-from pipeline.trainer import run_training
+from pipeline.trainer import run_training, suppress_ultralytics_console
 from pipeline.utils import TopKWeightsTracker, append_csv_row, cleanup_run_artifacts
+
+
+class _InterceptHandler(logging.Handler):
+    """Forward stdlib logging records to loguru."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        frame, depth = sys._getframe(6), 6
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
 def _setup_logging(cfg: dict, run_root: Path) -> None:
@@ -64,8 +80,11 @@ def _setup_logging(cfg: dict, run_root: Path) -> None:
         format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name} | {message}",
     )
 
-    # Suppress Ultralytics stdlib logs from the console
-    logging.getLogger("ultralytics").setLevel(logging.WARNING)
+    # Route all stdlib logging (pipeline modules) through loguru
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+
+    # Must come after basicConfig so propagate=False takes effect on the new root handler
+    suppress_ultralytics_console()
 
 
 def _build_head_initializer(cfg: dict, class_names: list[str]) -> HeadInitializer | None:
@@ -267,6 +286,21 @@ def main() -> None:
         run_id=run_id,
     )
     logger.info(f"  ONNX model: {onnx_path}")
+
+    # Demo inference — before cleanup so weights_path is still valid
+    demo_dir = str(Path(cfg["data"]["dataset_dir"]) / "demo")
+    if Path(demo_dir).exists():
+        logger.info("Running demo inference...")
+        demo_paths = run_demo_inference(
+            weights_path=final_result.weights_path,
+            demo_dir=demo_dir,
+            output_dir=str(run_root / "demo_predictions"),
+            conf_threshold=cfg.get("demo", {}).get("conf_threshold", 0.25),
+            imgsz=cfg["compute"]["imgsz"],
+            device=cfg["compute"]["device"],
+        )
+        if demo_paths:
+            logger.info(f"  Demo predictions: {len(demo_paths)} video(s) saved.")
 
     # Top-k tracking + cleanup — after export so weights_path is still valid above
     if final_result.save_dir:

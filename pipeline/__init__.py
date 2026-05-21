@@ -8,6 +8,7 @@ from .grid_search import GridSearcher, ModelSelectionResult
 from .bayesian_search import BayesianSearcher
 from .export import export_onnx
 from .utils import TopKWeightsTracker, cleanup_run_artifacts, append_csv_row
+from .demo import run_demo_inference
 
 __all__ = [
     "load_config",
@@ -24,4 +25,5 @@ __all__ = [
     "TopKWeightsTracker",
     "cleanup_run_artifacts",
     "append_csv_row",
+    "run_demo_inference",
 ]

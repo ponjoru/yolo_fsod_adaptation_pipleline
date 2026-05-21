@@ -53,6 +53,9 @@ dataset/
 ├── subsets/
 │   ├── train.txt         # fixed train split (for debug/reproducibility)
 │   └── val.txt           # fixed val split (for debug/reproducibility)
+├── demo/                 # demo videos for inference visualization — optional
+│   ├── clip_001.mp4
+│   └── ...               # any mix of video formats
 └── data.yaml             # YOLO dataset config (class names, nc, paths)
 ```
 
@@ -64,6 +67,7 @@ dataset/
 - `labels/train/` — one `.txt` file per image in `images/train/`, YOLO format
 - `subsets/train.txt` and `subsets/val.txt` — base fixed splits for deterministic debugging only; not used in the main pipeline search
 - `data.yaml` — standard YOLO dataset config; class names are read from here and cross-referenced with the class mapping in config
+- `demo/` — optional; if present, the pipeline runs inference on all videos found here at the end of training and saves annotated output to `{run_id}/demo_predictions/`
 
 ## Frame Naming Convention
 - Format: `{video_id}_{frame_id}.png` (e.g. `002_01067.png`)
@@ -593,6 +597,52 @@ The main pipeline entrypoint (`run_pipeline.py`) uses [loguru](https://github.co
 - File format: `YYYY-MM-DD HH:mm:ss | LEVEL | name | message` — full context for post-run inspection
 - Stdlib `logging` is retained only for the single Ultralytics suppression line (`logging.getLogger("ultralytics").setLevel(WARNING)`); all pipeline log calls use loguru
 - The per-run Ultralytics `train.log` redirection in `trainer.py` is unchanged — it uses stdlib directly against `uu.LOGGER`
+
+---
+
+## Demo Video Inference
+
+At the end of a pipeline run, if `{dataset_dir}/demo/` exists, the final `.pt` weights are used to run inference over every video found in that folder and save annotated output.
+
+### Auto-detection
+
+The pipeline checks for `{dataset_dir}/demo/` automatically — no config required to enable it. If the folder is absent the step is silently skipped.
+
+### Supported formats
+
+`.mp4`, `.avi`, `.mov`, `.mkv`, `.webm`, `.m4v` — all video files under `demo/` are processed (recursive search).
+
+### Output
+
+Annotated videos are written to `{run_id}/demo_predictions/{original_stem}.mp4`, alongside the other run artifacts.
+
+### Confidence threshold
+
+Controlled by `demo.conf_threshold` in `config_ml.yaml` (default `0.25`). This is a fixed value, not searched. Use `config_user.yaml` to override it per project.
+
+### Standalone re-run
+
+After the pipeline finishes, inference can be re-run at any confidence threshold without retraining:
+
+```bash
+python run_demo.py \
+    --weights runs/run_<id>/weights/<run_name>/weights/best.pt \
+    --demo-dir /path/to/dataset/demo \
+    --conf 0.35 \
+    --output-dir runs/run_<id>/demo_predictions_conf0.35
+```
+
+Optionally, pull `imgsz` / `device` / `conf` defaults from an existing config:
+
+```bash
+python run_demo.py \
+    --weights ... \
+    --demo-dir ... \
+    --ml-config config_ml.yaml \
+    --conf 0.4          # CLI arg overrides config default
+```
+
+Image size is always kept consistent with the training run (pulled from config or passed explicitly via `--imgsz`).
 
 ---
 

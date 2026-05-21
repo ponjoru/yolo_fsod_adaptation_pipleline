@@ -68,6 +68,9 @@ export:
   format: onnx
   output_dir: ./output
 
+demo:
+  conf_threshold: 0.25
+
 compute:
   device: "0"               # cuda device index or "cpu"
   workers: 4
