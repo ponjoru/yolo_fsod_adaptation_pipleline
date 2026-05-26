@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import random
@@ -109,16 +110,17 @@ def run_training(
     freeze_bn: bool,
     lr0: float = 0.01,
     augment_params: Dict[str, Any],
-    run_dir: str,
     cfg: Dict[str, Any],
     head_init_callback: Optional[callable] = None,
+    run_name_prefix: str = "",
 ) -> TrainResult:
     """Train one YOLO model for one fold. Returns TrainResult with metrics."""
 
     verbose = cfg["logging"]["verbose"]
     seed = cfg["compute"]["seed"]
-    run_name = f"fold{fold_idx}_{model_name}_ep{epochs}_{freeze}_fbn{int(freeze_bn)}"
-    log_path = str(Path(run_dir) / run_name / "train.log")
+    base_name = f"{model_name}_ep{epochs}_{freeze}_fbn{int(freeze_bn)}"
+    run_name = f"{run_name_prefix}_{base_name}" if run_name_prefix else base_name
+    log_path = str(Path("runs") / "detect" / run_name / "train.log")
     _redirect_ultralytics_to_file(log_path)
     _set_global_seeds(seed)
 
@@ -147,13 +149,13 @@ def run_training(
         "workers": workers,
         "batch": batch,
         "imgsz": imgsz,
-        "project": run_dir,
         "name": run_name,
         "exist_ok": True,
         "verbose": verbose,
         "patience": 0,           # disable early stopping in search phase
         "seed": seed,
         "lr0": lr0,
+        "optimizer": 'AdamW',
         "save": True,
         "plots": False,
         # Augmentation defaults from ML config
@@ -168,6 +170,11 @@ def run_training(
     for key in ("perspective", "scale", "translate", "degrees"):
         if key in augment_params:
             train_kwargs[key] = augment_params[key]
+
+    args_path = Path("runs") / "detect" / run_name / "args.json"
+    args_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(args_path, "w") as f:
+        json.dump(train_kwargs, f, indent=2)
 
     try:
         with open(log_path, "a") as _stderr_sink, contextlib.redirect_stderr(_stderr_sink):
@@ -192,7 +199,7 @@ def run_training(
     map_val = float(metrics.get("metrics/mAP50-95(B)", 0.0))
 
     # Find best weights
-    save_dir = Path(results.save_dir) if hasattr(results, "save_dir") else Path(run_dir)
+    save_dir = Path(results.save_dir) if hasattr(results, "save_dir") else Path("runs") / "detect" / run_name
     best_weights = str(save_dir / "weights" / "best.pt")
     if not Path(best_weights).exists():
         best_weights = str(save_dir / "weights" / "last.pt")

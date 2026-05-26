@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -43,7 +44,7 @@ from pipeline.head_init import HeadInitializer
 from pipeline.demo import run_demo_inference
 from pipeline.robustness import RobustnessEvaluator
 from pipeline.trainer import run_training, suppress_ultralytics_console
-from pipeline.utils import TopKWeightsTracker, append_csv_row, cleanup_run_artifacts
+from pipeline.utils import append_csv_row, delete_run_dir
 
 
 class _InterceptHandler(logging.Handler):
@@ -82,6 +83,10 @@ def _setup_logging(cfg: dict, run_root: Path) -> None:
 
     # Route all stdlib logging (pipeline modules) through loguru
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+
+    # Silence chatty third-party loggers that flood main.log with DEBUG noise
+    for _noisy in ("PIL", "matplotlib", "urllib3", "filelock"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     # Must come after basicConfig so propagate=False takes effect on the new root handler
     suppress_ultralytics_console()
@@ -141,8 +146,6 @@ def main() -> None:
     # ------------------------------------------------------------------
     grid_search_dir  = str(run_root / "grid_search")
     bayesian_dir     = str(run_root / "bayesian_search")
-    final_dir        = str(run_root / "final")
-    weights_dir      = str(run_root / "weights")
     augmented_dir    = str(run_root / "robustness_check_images" / "augmented_images")
     final_pred_dir   = str(run_root / "robustness_check_images" / "final_predictions")
     csv_path         = str(run_root / "results.csv")
@@ -150,9 +153,6 @@ def main() -> None:
     metric = cfg["scoring"]["metric"]
     metric_suffix = "map50" if metric == "map50" else "map"
     _init_csv(csv_path, metric_suffix)
-
-    top_k = cfg["logging"].get("top_k_weights", 3)
-    weights_tracker = TopKWeightsTracker(weights_dir=weights_dir, k=top_k)
 
     # ------------------------------------------------------------------
     # 1. Dataset construction
@@ -185,7 +185,6 @@ def main() -> None:
         nc=nc,
         probe_mosaic_dir=augmented_dir,
         csv_path=csv_path,
-        weights_tracker=weights_tracker,
     )
     logger.info(
         f"  Best model → {model_result.model_name} | "
@@ -207,7 +206,6 @@ def main() -> None:
         class_names=class_names,
         nc=nc,
         csv_path=csv_path,
-        weights_tracker=weights_tracker,
     )
     logger.info(
         f"  Best recipe → epochs={best_recipe.epochs}, freeze={best_recipe.freeze}, "
@@ -240,7 +238,6 @@ def main() -> None:
             "translate": best_recipe.translate,
             "degrees": best_recipe.degrees,
         },
-        run_dir=final_dir,
         cfg=cfg,
         head_init_callback=head_cb,
     )
@@ -302,10 +299,12 @@ def main() -> None:
         if demo_paths:
             logger.info(f"  Demo predictions: {len(demo_paths)} video(s) saved.")
 
-    # Top-k tracking + cleanup — after export so weights_path is still valid above
-    if final_result.save_dir:
-        weights_tracker.consider(final_score, Path(final_result.save_dir).name, final_result.save_dir)
-        cleanup_run_artifacts(final_result.save_dir)
+    # Copy final run folder to pipeline dir, then delete from runs/detect
+    if final_result.save_dir and Path(final_result.save_dir).exists():
+        final_dst = run_root / "final"
+        shutil.copytree(final_result.save_dir, final_dst, dirs_exist_ok=True)
+        logger.info(f"  Final run saved to: {final_dst}")
+        delete_run_dir(final_result.save_dir)
 
     DatasetBuilder.cleanup_fold(full_fold)
     for fold in folds:

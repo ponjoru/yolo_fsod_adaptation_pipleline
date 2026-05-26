@@ -81,4 +81,3 @@ compute:
 logging:
   verbose: false
   save_dir: ./runs
-  top_k_weights: 3

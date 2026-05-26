@@ -19,7 +19,7 @@ from .head_init import HeadInitializer
 from .robustness import RobustnessEvaluator
 from .scoring import compute_composite_score
 from .trainer import run_training
-from .utils import TopKWeightsTracker, append_csv_row, cleanup_run_artifacts
+from .utils import append_csv_row, delete_run_dir
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,6 @@ class GridSearcher:
         nc: Optional[int] = None,
         probe_mosaic_dir: Optional[str] = None,
         csv_path: Optional[str] = None,
-        weights_tracker: Optional[TopKWeightsTracker] = None,
     ) -> ModelSelectionResult:
         baseline = self.gs_cfg["baseline"]
         baseline_epochs: int = baseline["epochs"]
@@ -119,7 +118,6 @@ class GridSearcher:
                     freeze_bn=freeze_bn,
                     lr0=baseline_lr0,
                     augment_params={},
-                    run_dir=self.run_dir,
                     cfg=self.cfg,
                     head_init_callback=head_cb,
                 )
@@ -144,11 +142,8 @@ class GridSearcher:
                     except Exception as e:
                         logger.warning(f"Robustness eval failed for {run_key}: {e}")
 
-                # Top-k tracking then cleanup (robustness eval already consumed weights)
-                if weights_tracker and result.save_dir:
-                    weights_tracker.consider(score, Path(result.save_dir).name, result.save_dir)
                 if result.save_dir:
-                    cleanup_run_artifacts(result.save_dir)
+                    delete_run_dir(result.save_dir)
 
                 record = {
                     "run_key": run_key,
@@ -164,14 +159,18 @@ class GridSearcher:
                 per_model_scores.setdefault(model_name, []).append(score)
                 per_model_rob.setdefault(model_name, []).append(rob)
 
-            # Write one CSV row per model after all its folds complete
+            # Log and write one CSV row per model after all its folds complete
+            fold_scores = per_model_scores.get(model_name, [])
+            rob_scores = per_model_rob.get(model_name, [])
+            mean_rob = statistics.mean(rob_scores) if rob_scores else 0.0
+            composite = compute_composite_score(fold_scores, mean_rob, self.cfg)
+            cv_mean = statistics.mean(fold_scores) if fold_scores else 0.0
+            cv_std = statistics.stdev(fold_scores) if len(fold_scores) > 1 else 0.0
+            logger.info(
+                f"{model_name} | score={composite:.4f} | "
+                f"{self.metric_key}={cv_mean:.4f} ± {cv_std:.4f} | rob={mean_rob:.4f}"
+            )
             if csv_path:
-                fold_scores = per_model_scores.get(model_name, [])
-                rob_scores = per_model_rob.get(model_name, [])
-                mean_rob = statistics.mean(rob_scores) if rob_scores else 0.0
-                composite = compute_composite_score(fold_scores, mean_rob, self.cfg)
-                cv_mean = statistics.mean(fold_scores) if fold_scores else 0.0
-                cv_std = statistics.stdev(fold_scores) if len(fold_scores) > 1 else 0.0
                 append_csv_row(csv_path, [
                     model_name, "phase1",
                     f"{composite:.6f}", f"{cv_mean:.6f}", f"{cv_std:.6f}", f"{mean_rob:.6f}",

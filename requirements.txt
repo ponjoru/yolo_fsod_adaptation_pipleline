@@ -1,11 +1,8 @@
-ultralytics~=8.3
-loguru~=0.7
-optuna~=4.1
+ultralytics==8.4.51
+loguru==0.7.3
+optuna==4.8.0
 opencv-python~=4.10
 pyyaml~=6.0
 numpy~=2.0
-# torch is CUDA-version dependent — install separately per environment:
-#   CPU:        pip install torch~=2.5.0
-#   CUDA 12.1:  pip install torch~=2.5.0 --index-url https://download.pytorch.org/whl/cu121
-#   CUDA 12.4:  pip install torch~=2.5.0 --index-url https://download.pytorch.org/whl/cu124
-torch~=2.5
+torch==2.4.1
+

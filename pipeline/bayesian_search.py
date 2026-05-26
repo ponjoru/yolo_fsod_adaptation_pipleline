@@ -29,7 +29,7 @@ from .head_init import HeadInitializer
 from .robustness import RobustnessEvaluator
 from .scoring import compute_composite_score
 from .trainer import run_training
-from .utils import TopKWeightsTracker, append_csv_row, cleanup_run_artifacts
+from .utils import append_csv_row, delete_run_dir
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,6 @@ class BayesianSearcher:
         class_names: Optional[List[str]] = None,
         nc: Optional[int] = None,
         csv_path: Optional[str] = None,
-        weights_tracker: Optional[TopKWeightsTracker] = None,
     ) -> BayesianResult:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -114,9 +113,9 @@ class BayesianSearcher:
                         "translate": translate,
                         "degrees": degrees,
                     },
-                    run_dir=self.run_dir,
                     cfg=self.cfg,
                     head_init_callback=head_cb,
+                    run_name_prefix=f"{trial.number + 1:03d}",
                 )
 
                 score = result.map50 if self.metric_key == "map50" else result.map
@@ -136,12 +135,8 @@ class BayesianSearcher:
                         logger.warning(f"Robustness eval failed in trial {trial.number}: {e}")
                 rob_scores.append(rob)
 
-                # Top-k tracking then cleanup (robustness eval already consumed weights)
-                if weights_tracker and result.save_dir:
-                    run_key = f"trial{trial.number:04d}_fold{fold.fold_idx}"
-                    weights_tracker.consider(score, run_key, result.save_dir)
                 if result.save_dir:
-                    cleanup_run_artifacts(result.save_dir)
+                    delete_run_dir(result.save_dir)
 
             mean_rob = statistics.mean(rob_scores) if rob_scores else 0.0
             composite = compute_composite_score(cv_scores, mean_rob, self.cfg)
