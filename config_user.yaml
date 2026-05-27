@@ -14,8 +14,8 @@ data:
 # hair drier, toothbrush
 
 classes:
-  mapping:
-    "person": "person"
+  mapping: {}
+    # "person": "person"
     # "vehicle": ["car", "truck", "bus"]
 
 bayesian_search:
@@ -25,4 +25,8 @@ export:
   output_dir: ./output
 
 compute:
+  imgsz: 640                # 640 for big objects, 960 for small objects
   device: "0"               # "0" for first GPU, "cpu" for CPU-only
+
+demo:
+  tracker: null              # whether to aplly tracker to demo, 'null' == no tracker, 'bytetrack.yaml' - fast tracker

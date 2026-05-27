@@ -110,6 +110,7 @@ def run_training(
     freeze_bn: bool,
     lr0: float = 0.01,
     augment_params: Dict[str, Any],
+    run_dir: str,
     cfg: Dict[str, Any],
     head_init_callback: Optional[callable] = None,
     run_name_prefix: str = "",
@@ -120,7 +121,7 @@ def run_training(
     seed = cfg["compute"]["seed"]
     base_name = f"{model_name}_ep{epochs}_{freeze}_fbn{int(freeze_bn)}"
     run_name = f"{run_name_prefix}_{base_name}" if run_name_prefix else base_name
-    log_path = str(Path("runs") / "detect" / run_name / "train.log")
+    log_path = str(Path(run_dir) / run_name / f"fold{fold_idx}.log")
     _redirect_ultralytics_to_file(log_path)
     _set_global_seeds(seed)
 
@@ -171,7 +172,7 @@ def run_training(
         if key in augment_params:
             train_kwargs[key] = augment_params[key]
 
-    args_path = Path("runs") / "detect" / run_name / "args.json"
+    args_path = Path(run_dir) / run_name / "args.json"
     args_path.parent.mkdir(parents=True, exist_ok=True)
     with open(args_path, "w") as f:
         json.dump(train_kwargs, f, indent=2)

@@ -98,12 +98,8 @@ def _build_head_initializer(cfg: dict, class_names: list[str]) -> HeadInitialize
         logger.info("No class mapping defined — all heads will use random initialization.")
         return None
 
-    model_name = cfg["grid_search"]["models"][0]
-    weights_file = f"{model_name}.pt"
-
     try:
         return HeadInitializer(
-            coco_weights_path=weights_file,
             target_classes=class_names,
             class_mapping=mapping,
         )
@@ -222,7 +218,7 @@ def main() -> None:
     append_csv_row(csv_path, ["--- Final Training ---", "", "", "", "", ""])
 
     full_fold = builder.build_full_train()
-    head_cb = head_initializer.make_callback() if head_initializer else None
+    head_cb = head_initializer.make_callback(model_result.model_name) if head_initializer else None
 
     final_result = run_training(
         model_name=model_result.model_name,
@@ -295,6 +291,7 @@ def main() -> None:
             conf_threshold=cfg.get("demo", {}).get("conf_threshold", 0.25),
             imgsz=cfg["compute"]["imgsz"],
             device=cfg["compute"]["device"],
+            tracker=cfg.get("demo", {}).get("tracker", None),
         )
         if demo_paths:
             logger.info(f"  Demo predictions: {len(demo_paths)} video(s) saved.")

@@ -50,19 +50,23 @@ def _get_last_conv(module: nn.Module) -> Optional[nn.Conv2d]:
 
 class HeadInitializer:
     """Extracts COCO detection head weights and produces a training callback
-    that copies them into the new-nc model for mapped classes."""
+    that copies them into the new-nc model for mapped classes.
+
+    Weights are extracted lazily per model name and cached, so a single
+    HeadInitializer instance works correctly across architectures of different
+    channel widths (yolo11s/m/l).
+    """
 
     def __init__(
         self,
-        coco_weights_path: str,
         target_classes: List[str],
         class_mapping: Dict[str, object],  # target_name -> coco_name | [coco_names]
     ):
         self.target_classes = target_classes
         self.class_mapping = {k.lower(): v for k, v in class_mapping.items()}
-        self._coco_head_weights = self._extract_coco_head(coco_weights_path)
+        self._cache: Dict[str, Optional[List]] = {}
 
-    def _extract_coco_head(self, weights_path: str) -> Optional[Dict]:
+    def _extract_coco_head(self, weights_path: str) -> Optional[List]:
         """Load COCO model and store cv3 (classification branch) weights per scale."""
         try:
             from ultralytics import YOLO
@@ -80,9 +84,14 @@ class HeadInitializer:
                 })
             return scale_weights
         except Exception as e:
-            logger.warning(f"Could not extract COCO head weights: {e}. "
+            logger.warning(f"Could not extract COCO head weights from {weights_path!r}: {e}. "
                            "Mapped classes will use random initialization.")
             return None
+
+    def _get_weights(self, model_name: str) -> Optional[List]:
+        if model_name not in self._cache:
+            self._cache[model_name] = self._extract_coco_head(f"{model_name}.pt")
+        return self._cache[model_name]
 
     def _resolve_coco_indices(self, target_class: str) -> List[int]:
         raw = self.class_mapping.get(target_class.lower())
@@ -99,9 +108,9 @@ class HeadInitializer:
                 indices.append(idx)
         return indices
 
-    def make_callback(self) -> callable:
-        """Return an on_train_start callback that copies COCO head weights."""
-        coco_weights = self._coco_head_weights
+    def make_callback(self, model_name: str) -> callable:
+        """Return an on_train_start callback that copies COCO head weights for model_name."""
+        coco_weights = self._get_weights(model_name)
         target_classes = self.target_classes
 
         def on_train_start(trainer):

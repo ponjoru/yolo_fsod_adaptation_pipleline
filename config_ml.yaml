@@ -70,6 +70,7 @@ export:
 
 demo:
   conf_threshold: 0.25
+  tracker: null              # null | bytetrack.yaml | botsort.yaml
 
 compute:
   device: "0"               # cuda device index or "cpu"

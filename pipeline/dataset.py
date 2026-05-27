@@ -14,6 +14,7 @@ import yaml
 
 
 _FRAME_RE = re.compile(r"_(\d+)\.[^.]+$")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".PNG", ".JPEG"}
 
 
 def resolve_freeze_bn(cfg: dict, n_train_images: int) -> bool:
@@ -130,9 +131,10 @@ class DatasetBuilder:
     def _collect_negatives(self, n_positives: int) -> List[str]:
         if not self.neg_images_dir.exists():
             return []
-        neg_imgs = sorted(self.neg_images_dir.glob("*.png")) + \
-                   sorted(self.neg_images_dir.glob("*.jpg")) + \
-                   sorted(self.neg_images_dir.glob("*.jpeg"))
+        neg_imgs = sorted(
+            p for p in self.neg_images_dir.iterdir()
+            if p.suffix.lower() in IMAGE_EXTENSIONS
+        )
         neg_imgs = [str(p) for p in neg_imgs]
         target_count = int(n_positives * self.negative_ratio)
         if len(neg_imgs) < target_count:
@@ -181,9 +183,8 @@ class DatasetBuilder:
 
     def build_folds(self) -> List[FoldPaths]:
         all_images = sorted(
-            list(self.train_images_dir.glob("*.png")) +
-            list(self.train_images_dir.glob("*.jpg")) +
-            list(self.train_images_dir.glob("*.jpeg"))
+            p for p in self.train_images_dir.iterdir()
+            if p.suffix.lower() in IMAGE_EXTENSIONS
         )
         all_images = [str(p) for p in all_images]
 
@@ -233,9 +234,8 @@ class DatasetBuilder:
     def build_full_train(self) -> FoldPaths:
         """Build a dataset using all available images (no val split) for final retraining."""
         all_images = sorted(
-            list(self.train_images_dir.glob("*.png")) +
-            list(self.train_images_dir.glob("*.jpg")) +
-            list(self.train_images_dir.glob("*.jpeg"))
+            p for p in self.train_images_dir.iterdir()
+            if p.suffix.lower() in IMAGE_EXTENSIONS
         )
         all_images = [str(p) for p in all_images]
         neg_imgs = self._collect_negatives(len(all_images))

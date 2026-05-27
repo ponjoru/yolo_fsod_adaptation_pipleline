@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import cv2
 
@@ -29,9 +29,11 @@ def run_demo_inference(
     conf_threshold: float,
     imgsz: int,
     device: str,
+    tracker: Optional[str] = None,
 ) -> List[str]:
     """Run inference on all videos in demo_dir, save annotated mp4s to output_dir.
 
+    Pass tracker="bytetrack.yaml" (or "botsort.yaml") to enable multi-object tracking.
     Returns list of output file paths.
     """
     from ultralytics import YOLO
@@ -50,7 +52,10 @@ def run_demo_inference(
     output_paths: List[str] = []
 
     for video_path in videos:
-        logger.info(f"  Demo: {video_path.name}  conf={conf_threshold}")
+        logger.info(
+            f"  Demo: {video_path.name}  conf={conf_threshold}"
+            + (f"  tracker={tracker}" if tracker else "")
+        )
         out_path = out_root / f"{video_path.stem}.mp4"
 
         cap = cv2.VideoCapture(str(video_path))
@@ -67,18 +72,23 @@ def run_demo_inference(
             (width, height),
         )
 
+        common_kwargs = dict(
+            source=str(video_path),
+            imgsz=imgsz,
+            conf=conf_threshold,
+            device=device,
+            stream=True,
+            verbose=False,
+            save=False,
+        )
+
         try:
-            for frame_idx, result in enumerate(
-                model.predict(
-                    source=str(video_path),
-                    imgsz=imgsz,
-                    conf=conf_threshold,
-                    device=device,
-                    stream=True,
-                    verbose=False,
-                    save=False,
-                )
-            ):
+            stream = (
+                model.track(**common_kwargs, tracker=tracker, persist=False)
+                if tracker
+                else model.predict(**common_kwargs)
+            )
+            for frame_idx, result in enumerate(stream):
                 writer.write(result.plot())
                 if total_frames and (frame_idx + 1) % 200 == 0:
                     logger.debug(f"    {frame_idx + 1}/{total_frames} frames")

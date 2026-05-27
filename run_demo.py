@@ -35,6 +35,7 @@ def main() -> None:
     parser.add_argument("--conf",      type=float, default=None, help="Confidence threshold (default: from config or 0.25)")
     parser.add_argument("--imgsz",     type=int,   default=None, help="Inference image size (default: from config or 640)")
     parser.add_argument("--device",    default=None,        help="Device — cuda index or 'cpu' (default: from config or '0')")
+    parser.add_argument("--tracker",    default=None,        help="Tracker config: 'bytetrack.yaml' or 'botsort.yaml' (default: no tracking)")
     parser.add_argument("--ml-config",  default=None,       help="Optional: config_ml.yaml to pull imgsz/device/conf defaults")
     parser.add_argument("--user-config", default=None,      help="Optional: config_user.yaml overrides")
     args = parser.parse_args()
@@ -51,6 +52,7 @@ def main() -> None:
     conf_threshold = 0.25
     imgsz = 640
     device = "0"
+    tracker = None
 
     if args.ml_config:
         from pipeline.config import load_config
@@ -58,11 +60,13 @@ def main() -> None:
         conf_threshold = cfg.get("demo", {}).get("conf_threshold", 0.25)
         imgsz = cfg["compute"]["imgsz"]
         device = cfg["compute"]["device"]
+        tracker = cfg.get("demo", {}).get("tracker", None)
 
     # CLI args override config
-    if args.conf   is not None: conf_threshold = args.conf
-    if args.imgsz  is not None: imgsz = args.imgsz
-    if args.device is not None: device = args.device
+    if args.conf    is not None: conf_threshold = args.conf
+    if args.imgsz   is not None: imgsz = args.imgsz
+    if args.device  is not None: device = args.device
+    if args.tracker is not None: tracker = args.tracker
 
     output_dir = args.output_dir or str(Path(args.weights).parent.parent.parent / "demo_predictions")
 
@@ -77,7 +81,7 @@ def main() -> None:
     logger.info(f"Weights   : {args.weights}")
     logger.info(f"Demo dir  : {args.demo_dir}")
     logger.info(f"Output    : {output_dir}")
-    logger.info(f"Conf      : {conf_threshold}  |  imgsz: {imgsz}  |  device: {device}")
+    logger.info(f"Conf      : {conf_threshold}  |  imgsz: {imgsz}  |  device: {device}  |  tracker: {tracker or 'none'}")
 
     suppress_ultralytics_console()
 
@@ -88,6 +92,7 @@ def main() -> None:
         conf_threshold=conf_threshold,
         imgsz=imgsz,
         device=device,
+        tracker=tracker,
     )
 
     if output_paths:

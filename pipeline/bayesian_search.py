@@ -97,7 +97,7 @@ class BayesianSearcher:
             rob_scores: List[float] = []
 
             for fold in folds:
-                head_cb = head_initializer.make_callback() if head_initializer else None
+                head_cb = head_initializer.make_callback(model_name) if head_initializer else None
 
                 result = run_training(
                     model_name=model_name,
@@ -113,6 +113,7 @@ class BayesianSearcher:
                         "translate": translate,
                         "degrees": degrees,
                     },
+                    run_dir=self.run_dir,
                     cfg=self.cfg,
                     head_init_callback=head_cb,
                     run_name_prefix=f"{trial.number + 1:03d}",

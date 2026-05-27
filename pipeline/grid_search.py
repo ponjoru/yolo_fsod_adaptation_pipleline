@@ -107,7 +107,7 @@ class GridSearcher:
                     continue
 
                 logger.info(f"[{run_idx}/{total}] Training: {run_key}")
-                head_cb = head_initializer.make_callback() if head_initializer else None
+                head_cb = head_initializer.make_callback(model_name) if head_initializer else None
 
                 result = run_training(
                     model_name=model_name,
@@ -118,6 +118,7 @@ class GridSearcher:
                     freeze_bn=freeze_bn,
                     lr0=baseline_lr0,
                     augment_params={},
+                    run_dir=self.run_dir,
                     cfg=self.cfg,
                     head_init_callback=head_cb,
                 )
